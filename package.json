@@ -1,0 +1,19 @@
+{
+  "name": "whalemind-debate-united-platform",
+  "private": true,
+  "version": "0.1.0",
+  "description": "辩论赛全流程系统：主席控制台 + 评委打分端 + 大屏展示端",
+  "scripts": {
+    "dev": "pnpm -r --parallel dev",
+    "dev:server": "pnpm --filter @debate/server dev",
+    "dev:client": "pnpm --filter @debate/client dev",
+    "test": "pnpm --filter @debate/server test",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild", "vue-demi"]
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.1"
+  }
+}
