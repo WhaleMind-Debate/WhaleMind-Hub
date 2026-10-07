@@ -10,6 +10,7 @@ const EVENTS = {
   MATCH_COMMAND: 'match:command',
   JUDGE_JOIN: 'judge:join',
   SCORE_SUBMIT: 'score:submit',
+  SCORE_PREVIEW: 'score:preview',
   GAME_STATE: 'game:state',
 };
 
@@ -113,31 +114,83 @@ const s5 = await waitState(screen, getLatest, (s) => s.status === 'running', '�
 check('暂停 2s 后恢复，反方剩余不漂移', Math.abs(s5.timers.neg.remainingMs - negRemainingAtPause) < 300);
 check('恢复后 targetEndTime 重新生成', s5.timers.neg.targetEndTime != null);
 
-// 5. 评委入场 + 打分进度
-const judge = connect('judge');
-const joinRes = await new Promise((r) =>
-  judge.emit(EVENTS.JUDGE_JOIN, { name: '测试评委', entryCode: s5.config.entryCode }, r),
-);
-check('评委凭入场码加入', joinRes.ok === true);
-const wrongCode = await new Promise((r) =>
-  judge.emit(EVENTS.JUDGE_JOIN, { name: 'x', entryCode: '000000' }, r),
-);
+// 5. 评委入场 + 多评委打分全链路
+function join(name, entryCode) {
+  return new Promise((r) => judgeA.emit(EVENTS.JUDGE_JOIN, { name, entryCode }, r));
+}
+function submit(socket, judgeId, stageId, side, value) {
+  return new Promise((r) => socket.emit(EVENTS.SCORE_SUBMIT, { judgeId, stageId, side, value }, r));
+}
+function preview(socket) {
+  return new Promise((r) => socket.emit(EVENTS.SCORE_PREVIEW, {}, r));
+}
+
+const judgeA = connect('judgeA');
+const judgeB = connect('judgeB');
+const joinA = await join('评委甲', s5.config.entryCode);
+check('评委甲凭入场码加入', joinA.ok === true);
+const wrongCode = await join('x', '000000');
 check('错误入场码被拒绝', wrongCode.ok === false);
+const joinB = await join('评委乙', s5.config.entryCode);
+check('评委乙凭入场码加入', joinB.ok === true);
 
-judge.emit(EVENTS.SCORE_SUBMIT, { judgeId: joinRes.judge.id, stageId: s5.stages[0].id, side: 'aff', value: 88 });
-const s6 = await waitState(screen, getLatest, (s) => s.scoreProgress.includes(joinRes.judge.id), '打分进度广播');
-check('打分进度实时广播（分数内容不外泄）', s6.scoreProgress.length === 1 && s6.scores === undefined);
+const stages = s5.stages;
+const submitResults = [];
+// 两位评委 × 3 个环节 × 正反双方（含 upsert：甲改一次分）
+submitResults.push(await submit(judgeA, joinA.judge.id, stages[0].id, 'aff', 80));
+submitResults.push(await submit(judgeA, joinA.judge.id, stages[0].id, 'neg', 75));
+submitResults.push(await submit(judgeA, joinA.judge.id, stages[1].id, 'aff', 85));
+submitResults.push(await submit(judgeB, joinB.judge.id, stages[0].id, 'aff', 90));
+submitResults.push(await submit(judgeB, joinB.judge.id, stages[1].id, 'neg', 88));
+submitResults.push(await submit(judgeA, joinA.judge.id, stages[0].id, 'aff', 88)); // upsert 改分
+check('全部评分提交成功', submitResults.every((r) => r?.ok === true));
 
-// 6. 公布比分
+const s6 = await waitState(
+  screen,
+  getLatest,
+  (s) => s.scoreProgress.includes(joinA.judge.id) && s.scoreProgress.includes(joinB.judge.id),
+  '打分进度广播',
+);
+check('打分进度实时广播（两位评委）', s6.scoreProgress.length === 2);
+check('分数内容对大屏不外泄', s6.scores === undefined && s6.published == null);
+
+// 总分预览：按加权公式现场算期望值（weighted = Σ 环节均分×权重），顺带验证公式与 upsert
+const prev = await preview(judgeA);
+check('总分预览可查（含加权总分）', prev.ok === true && typeof prev.scores?.aff?.weighted === 'number');
+const w = (i) => stages[i].weight ?? 1;
+// aff: 环节0 均分 (88+90)/2=89（甲改分后 88 生效即 upsert）、环节1 仅甲 85
+const expectAff = ((88 + 90) / 2) * w(0) + 85 * w(1);
+// neg: 环节0 仅甲 75、环节1 仅乙 88
+const expectNeg = 75 * w(0) + 88 * w(1);
+check('upsert 生效 + 加权公式正确（aff）', Math.abs(prev.scores.aff.weighted - expectAff) < 0.01);
+check('加权公式正确（neg）', Math.abs(prev.scores.neg.weighted - expectNeg) < 0.01);
+check('胜负判定正确', prev.scores.winner === (expectAff > expectNeg ? 'aff' : 'neg'));
+check('评委数统计正确', prev.scores.judgeCount === 2);
+
+// 6. 公布比分 → 大屏收到 published 总分与胜负
 res = await run({ type: 'publishScores' }, '公布比分');
 check('公布比分指令成功', res.ok);
-const s7 = await waitState(screen, getLatest, (s) => s.config.scoreVisibility === 'published', '比分公布');
-check('大屏比分可见性切换为 published', s7.config.scoreVisibility === 'published');
+const s7 = await waitState(screen, getLatest, (s) => s.published != null, '比分公布');
+check('大屏收到 published 总分与胜负', typeof s7.published?.aff?.weighted === 'number');
+check('scoreVisibility 同步为 published', s7.config.scoreVisibility === 'published');
+
+// 7. CSV 导出（走后端 HTTP 路由，与前端按钮同链路）
+const csvRes = await fetch(`http://localhost:3000/api/matches/${s7.config.matchId}/export.csv`);
+const csvBuf = new Uint8Array(await csvRes.arrayBuffer());
+// 注意：Response.text() 会按规范剥掉 BOM，BOM 必须验原始字节
+const hasBom = csvBuf[0] === 0xef && csvBuf[1] === 0xbb && csvBuf[2] === 0xbf;
+const csvText = new TextDecoder().decode(csvBuf);
+check('CSV 导出 HTTP 200', csvRes.ok);
+check('CSV 含 BOM（Excel 中文不乱码）', hasBom);
+check('CSV 含两位评委的评分行', csvText.includes('评委甲') && csvText.includes('评委乙'));
+check('CSV 无被覆盖的 80 分（upsert 铁证）', !csvText.includes(',80,'));
+check('CSV 含 upsert 后的 88 分', csvText.includes(',88,'));
 
 // 汇总
 const failed = results.filter((r) => !r.ok);
 console.log(`\n验收结果：${results.length - failed.length}/${results.length} 通过`);
 admin.close();
 screen.close();
-judge.close();
+judgeA.close();
+judgeB.close();
 process.exit(failed.length ? 1 : 0);

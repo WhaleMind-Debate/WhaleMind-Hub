@@ -282,8 +282,9 @@ io.on('connection', (socket) => {
     ack?.({ ok: true, scores: engine.computeTotals() });
   });
 
-  socket.on(SOCKET_EVENTS.SCORE_SUBMIT, (payload: ScoreSubmitPayload) => {
-    engine.submitScore(payload.judgeId, payload.stageId, payload.side, payload.value);
+  socket.on(SOCKET_EVENTS.SCORE_SUBMIT, (payload: ScoreSubmitPayload, ack?: (r: CommandResult) => void) => {
+    const result = engine.submitScore(payload.judgeId, payload.stageId, payload.side, payload.value);
+    ack?.(result);
     // 进度随状态快照统一下发（scoreProgress 字段），此处保留事件名供后续增量优化
     io.emit(SOCKET_EVENTS.SCORE_PROGRESS, {
       scoreProgress: engine.snapshot().scoreProgress,

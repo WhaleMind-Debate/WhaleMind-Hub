@@ -9,20 +9,21 @@
  * - **赛制草稿**是本组件的局部表单态：编辑期间不动 store，点「保存赛制」才通过
  *   setStages 指令交给服务端校验并广播回来——服务端始终是唯一权威。
  */
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { Message } from '@arco-design/web-vue';
 import { TEMPLATES, type MatchConfig, type PublishedScores, type SavedTemplate, type Side, type StageConfig } from '@/types/debate';
 import { useDebateStore } from '@/stores/debateStore';
 import { useSocket } from '@/composables/useSocket';
 import { useMasterClock, formatMs } from '@/composables/useMasterClock';
 import { createTemplate, deleteTemplate, fetchTemplates } from '@/api/templates';
+import { exportMatchCsvUrl } from '@/api/matches';
 import MatchInfoCard from '@/components/MatchInfoCard.vue';
 import StageTable from '@/components/StageTable.vue';
 import StageEditorDrawer from '@/components/StageEditorDrawer.vue';
 import { draftFromStage, draftToInput, type StageDraft } from '@/stages/draft';
 
 const store = useDebateStore();
-const { connect, sendCommand, previewScores } = useSocket();
+const { connect, sendCommand, previewScores, onScoreProgress } = useSocket();
 const { tick, remainingOf } = useMasterClock();
 
 const lastError = ref('');
@@ -231,8 +232,24 @@ async function refreshTotals(): Promise<void> {
   }
 }
 
-// 评委每次提交后自动刷新，主席无需手动点
-watch(() => store.state?.scoreProgress.length ?? 0, () => void refreshTotals(), { immediate: true });
+// 评委每次提交（含改分/补交）都会广播 score:progress，据此自动刷新总分预览；
+// 仅 watch scoreProgress.length 会漏掉同一评委的后续提交
+const offScoreProgress = onScoreProgress(() => void refreshTotals());
+onUnmounted(() => offScoreProgress());
+void refreshTotals();
+
+/** 导出成绩 CSV：走 HTTP 直链下载，后端带 BOM + Content-Disposition */
+function exportCsv(): void {
+  const matchId = store.config?.matchId;
+  if (!matchId) return;
+  // 用临时锚点触发下载：window.open 会被弹窗拦截器挡，锚点点击在用户手势内必然放行
+  const a = document.createElement('a');
+  a.href = exportMatchCsvUrl(matchId);
+  a.download = `${matchId}-scores.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
 
 /** 时钟同步状态：让主席一眼看出本机与服务端的时基是否可信 */
 const clockStatus = computed(() => {
@@ -372,7 +389,12 @@ function timerText(side: Side): string {
             </div>
           </template>
           <a-empty v-else description="暂无评分" />
-          <a-button class="total-refresh" size="small" :loading="previewBusy" @click="refreshTotals">刷新</a-button>
+          <a-space>
+            <a-button class="total-refresh" size="small" :loading="previewBusy" @click="refreshTotals">刷新</a-button>
+            <a-button class="total-refresh" size="small" :disabled="!store.config?.matchId" @click="exportCsv">
+              导出成绩 CSV
+            </a-button>
+          </a-space>
         </a-card>
       </a-layout-content>
     </a-layout>

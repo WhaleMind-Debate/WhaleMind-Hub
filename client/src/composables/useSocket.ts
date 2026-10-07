@@ -17,6 +17,7 @@ import {
   type ScoreSubmitPayload,
   type TimeSyncResult,
   type TimerWarnPayload,
+  type ScoreProgressPayload,
 } from '@/types/debate';
 import { useDebateStore } from '@/stores/debateStore';
 
@@ -145,5 +146,26 @@ export function useSocket() {
     return () => s.off(SOCKET_EVENTS.TIMER_WARN, handler);
   }
 
-  return { connect, sendCommand, judgeJoin, judgeResume, submitScore, onTimerWarn, syncTime, previewScores };
+  /**
+   * 评分提交订阅：服务端每次 score:submit 都会广播此事件
+   * （含评委改分/补交），控制台据此刷新总分预览——
+   * 只 watch scoreProgress.length 会漏掉同一评委的后续提交。
+   */
+  function onScoreProgress(handler: (p: ScoreProgressPayload) => void): () => void {
+    const s = connect();
+    s.on(SOCKET_EVENTS.SCORE_PROGRESS, handler);
+    return () => s.off(SOCKET_EVENTS.SCORE_PROGRESS, handler);
+  }
+
+  return {
+    connect,
+    sendCommand,
+    judgeJoin,
+    judgeResume,
+    submitScore,
+    onTimerWarn,
+    onScoreProgress,
+    syncTime,
+    previewScores,
+  };
 }
