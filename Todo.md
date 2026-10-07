@@ -12,6 +12,11 @@
 
 ### P0 — 已批计划欠账（优先做）
 
+- [ ] **大屏 UI 升级 + 当前辩手数据管道**（已批，待执行）：
+  - 数据四环：`SideDisplay.speakers: string[]` 名单 → `StageConfig.speakerName` 单向环节绑定 → engine 算 `GameState.activeSpeakerName`（自由辩按 Side 从名单取）→ 落盘/广播；白名单同步 `config.ts` `validateSide` + `stages.ts` `validateStages`，`MatchConfig` 加 `affPosition`/`negPosition`
+  - 录入 UI：现有"比赛信息"表单加双方观点 + 辩手名单；环节编辑抽屉加"本环节发言人"下拉
+  - 大屏：顶栏红蓝双立场条（两方观点 + 队名校名）、LED 风格计时、当前"哪方哪人发言"标签
+  - 空名单/空观点优雅回退；补单测 + smoke 断言 + 三窗口走查
 - [ ] **公网部署形态**：`ADMIN_PIN` 保护 `/admin` + 入场码防爆破限速（`server/src/index.ts` 两处注释已标注"属规划中"）
 - [ ] **预警时间点 UI**：`warnThresholds` 数据结构已有，控制台环节编辑器未暴露可配置入口；配套"提示音开关"控制台按钮
 - [ ] **队徽/背景图上传**：`SideDisplay.logoUrl` 字段已备，缺文件上传服务（`server/uploads`）+ 大屏展示；批过的本期加分项
