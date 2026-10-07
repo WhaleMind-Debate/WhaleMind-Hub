@@ -1,30 +1,67 @@
 <script setup lang="ts">
 /**
  * 大屏展示端（舞台投屏）
- * 不依赖通用 UI 库：纯 Flex/Grid + 大字号高对比度。
- * 倒计时每帧从 targetEndTime 反推（useMasterClock），多端绝对同步。
- * 音效/动效后续接入 GSAP；预留 timer:warn 订阅入口。
+ * 不依赖通用 UI 库：纯 Flex/Grid + 大字号高对比度，预警动效交给 GSAP。
+ * - 倒计时每帧从 targetEndTime 反推（useMasterClock），多端绝对同步；
+ * - 提示音由 useStageAudio 用 WebAudio 实时合成，进入时须先点击一次解锁 AudioContext
+ *   （浏览器 Autoplay 策略：无用户手势不允许起播），未解锁时静默跳过、绝不硬播。
  */
-import { computed, onMounted } from 'vue';
+import { computed, onMounted, onScopeDispose, ref } from 'vue';
+import gsap from 'gsap';
 import type { Side } from '@/types/debate';
 import { useDebateStore } from '@/stores/debateStore';
 import { useSocket } from '@/composables/useSocket';
 import { useMasterClock, formatMs } from '@/composables/useMasterClock';
+import { useStageAudio } from '@/composables/useStageAudio';
 
 const store = useDebateStore();
 const { connect, onTimerWarn } = useSocket();
 const { tick, remainingOf } = useMasterClock();
-
-onMounted(() => {
-  connect();
-  // 预警入口：铃声/GSAP 动效后续接入（须先点击解锁 AudioContext）
-  onTimerWarn(() => {
-    /* TODO(后续): 铃声 + 脉冲动效 */
-  });
-});
+const audio = useStageAudio();
 
 const currentStage = computed(() => store.currentStage);
 const isDual = computed(() => currentStage.value?.type === 'dual_alternating');
+
+/** 预警脉冲的目标元素：自由辩按方取，单向计时只有一个面板 */
+const panels: Partial<Record<Side, HTMLElement | null>> = {};
+const singlePanel = ref<HTMLElement | null>(null);
+function setPanelRef(side: Side, el: unknown): void {
+  panels[side] = (el as HTMLElement | null) ?? null;
+}
+function panelFor(side: Side): HTMLElement | null {
+  return isDual.value ? panels[side] ?? null : singlePanel.value;
+}
+
+/** 解锁遮罩：未完成一次交互前必须挡住，否则提示音永远无声 */
+const gateDismissed = ref(false);
+const showGate = computed(() => !gateDismissed.value && !audio.unlocked.value);
+
+async function enterStage(): Promise<void> {
+  await audio.unlock();
+  gateDismissed.value = true;
+}
+
+onMounted(() => {
+  connect();
+  onTimerWarn((payload) => {
+    // 1) 提示音：音色取自当前环节的 soundId；未解锁或已静音时静默跳过
+    audio.play(currentStage.value?.soundId);
+    // 2) 脉冲：只闪对应一方，避免整屏抖动
+    const el = panelFor(payload.side);
+    if (!el) return;
+    gsap.killTweensOf(el);
+    gsap.fromTo(
+      el,
+      { scale: 1 },
+      { scale: 1.05, duration: 0.16, repeat: 3, yoyo: true, ease: 'power2.inOut', transformOrigin: '50% 50%' },
+    );
+  });
+});
+
+onScopeDispose(() => {
+  const targets = [singlePanel.value, ...Object.values(panels)].filter((el): el is HTMLElement => el != null);
+  gsap.killTweensOf(targets);
+});
 
 function timerText(side: Side): string {
   void tick.value;
@@ -45,6 +82,24 @@ function isWarn(side: Side): boolean {
 
 <template>
   <div class="screen">
+    <!-- 音频解锁门：浏览器要求至少一次用户手势才允许出声，未解锁前不播任何声音 -->
+    <div v-if="showGate" class="gate">
+      <div class="gate-topic">{{ store.config?.topic ?? '辩论赛' }}</div>
+      <button class="gate-btn" type="button" @click="enterStage">点击进入大屏</button>
+      <div class="gate-hint">点击以解锁提示音（浏览器禁止无交互播放音频）</div>
+    </div>
+
+    <!-- 提示音开关 / 支持性提示 -->
+    <button
+      v-if="!showGate"
+      class="audio-chip"
+      type="button"
+      :title="audio.supported ? '点击切换提示音' : '当前浏览器不支持 WebAudio'"
+      @click="audio.toggleMute()"
+    >
+      {{ !audio.supported ? '🔇 无提示音' : audio.muted ? '🔇 已静音' : '🔔 提示音开' }}
+    </button>
+
     <!-- 辩题 -->
     <header class="topic">
       <div class="topic-text">{{ store.config?.topic ?? '辩论赛' }}</div>
@@ -68,6 +123,7 @@ function isWarn(side: Side): boolean {
           v-for="side in (['aff', 'neg'] as Side[])"
           :key="side"
           class="timer-panel"
+          :ref="(el) => setPanelRef(side, el)"
           :class="{ active: store.activeSpeaker === side, warn: isWarn(side) }"
           :style="{ borderColor: side === 'aff' ? store.config?.aff.color : store.config?.neg.color }"
         >
@@ -78,13 +134,34 @@ function isWarn(side: Side): boolean {
       </template>
       <template v-else-if="currentStage && currentStage.side">
         <!-- 单向计时：大字居中 -->
-        <div class="timer-single" :class="{ warn: isWarn(currentStage.side) }">
+        <div ref="singlePanel" class="timer-single" :class="{ warn: isWarn(currentStage.side) }">
           <div class="team">
             {{ currentStage.side === 'aff' ? store.config?.aff.teamName : store.config?.neg.teamName }}
           </div>
           <div class="time-huge">{{ timerText(currentStage.side) }}</div>
         </div>
       </template>
+    </section>
+
+    <!-- 成绩公布：主席点「公布比分」后才出现（未公布时服务端根本不下发分数） -->
+    <section v-if="store.published" class="scoreboard">
+      <div class="score-side" :class="{ winner: store.published.winner === 'aff' }">
+        <div class="score-team">{{ store.config?.aff.teamName }}</div>
+        <div class="score-value">{{ store.published.aff.weighted.toFixed(1) }}</div>
+      </div>
+      <div class="score-mid">
+        <div class="score-label">
+          {{ store.published.winner === null ? '暂时持平' : store.published.winner === 'aff' ? '正方领先' : '反方领先' }}
+        </div>
+        <div class="score-sub">
+          {{ store.published.judgeCount }} 位评委 · 正 {{ store.published.aff.scoredStages }} / 反
+          {{ store.published.neg.scoredStages }} 个环节计分
+        </div>
+      </div>
+      <div class="score-side" :class="{ winner: store.published.winner === 'neg' }">
+        <div class="score-team">{{ store.config?.neg.teamName }}</div>
+        <div class="score-value">{{ store.published.neg.weighted.toFixed(1) }}</div>
+      </div>
     </section>
 
     <!-- 底部双方对比（队名 + 称谓） -->
@@ -215,5 +292,106 @@ function isWarn(side: Side): boolean {
 .vs {
   font-size: 3vh;
   color: #64748b;
+}
+
+/* 成绩公布区：加权总分对比，领先方高亮 */
+.scoreboard {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6vw;
+  padding: 2vh 4vw;
+  margin-bottom: 1vh;
+  border-top: 0.2vh solid #1e293b;
+  border-bottom: 0.2vh solid #1e293b;
+}
+.score-side {
+  flex: 1;
+  text-align: center;
+  opacity: 0.55;
+  transition: opacity 0.3s;
+}
+.score-side.winner {
+  opacity: 1;
+}
+.score-team {
+  font-size: 3vh;
+  color: #94a3b8;
+}
+.score-value {
+  font-size: 9vh;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+.score-side.winner .score-value {
+  color: #34d399;
+  text-shadow: 0 0 3vh rgba(52, 211, 153, 0.45);
+}
+.score-mid {
+  text-align: center;
+  min-width: 18vw;
+}
+.score-label {
+  font-size: 3vh;
+  font-weight: 700;
+  color: #e2e8f0;
+}
+.score-sub {
+  font-size: 1.8vh;
+  color: #64748b;
+  margin-top: 0.6vh;
+}
+
+/* 音频解锁门：铺满全屏，点击后才允许出声 */
+.gate {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  background: rgba(11, 18, 32, 0.96);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3vh;
+  text-align: center;
+  padding: 4vw;
+  box-sizing: border-box;
+}
+.gate-topic {
+  font-size: 6vh;
+  font-weight: 700;
+}
+.gate-btn {
+  font-size: 4vh;
+  font-weight: 700;
+  padding: 3vh 8vw;
+  min-height: 48px;
+  border: none;
+  border-radius: 2vh;
+  background: #34d399;
+  color: #052e21;
+  cursor: pointer;
+}
+.gate-btn:active {
+  transform: scale(0.98);
+}
+.gate-hint {
+  font-size: 2.4vh;
+  color: #94a3b8;
+}
+
+/* 提示音开关：舞台工作人员临时静音用 */
+.audio-chip {
+  position: absolute;
+  top: 2vh;
+  right: 2vw;
+  font-size: 2vh;
+  padding: 1.2vh 2vw;
+  border-radius: 999px;
+  border: 0.2vh solid #334155;
+  background: rgba(15, 23, 42, 0.7);
+  color: #cbd5e1;
+  cursor: pointer;
 }
 </style>

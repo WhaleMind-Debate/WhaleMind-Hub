@@ -3,6 +3,7 @@
  * 覆盖：状态流转合法性、交替计时切换、归零自动推进、保护时间、非法流转拒绝。
  */
 import { describe, expect, it } from 'vitest';
+import type { MatchCommand } from '@debate/shared';
 import { GameEngine } from '../src/game/engine.js';
 import { createTimer, isDue, pauseTimer, remainingOf, startTimer } from '../src/game/timer.js';
 
@@ -252,5 +253,67 @@ describe('GameEngine 状态流转', () => {
     expect(s.config.entryCode).not.toBe(before.config.entryCode); // 新入场码
     expect(engine.joinJudge('张三', before.config.entryCode).ok).toBe(false); // 旧码失效
     expect(engine.submitScore(join.judge!.id, 'x', 'aff', 50).ok).toBe(false); // 旧评委失效
+  });
+});
+
+describe('countUp 正计时', () => {
+  /** 把快速赛制的第 1 个环节改成正计时 */
+  function asCountUp(engine: GameEngine): void {
+    const raw = engine as unknown as { state: { stages: { timerKind: string }[] } };
+    raw.state.stages[0].timerKind = 'countUp';
+  }
+
+  it('未启动时不显示总时长；运行中按已耗递增且不自动结束', () => {
+    const { engine, clock } = makeEngine();
+    engine.command({ type: 'loadTemplate', templateId: 'quick-test' });
+    asCountUp(engine);
+    engine.command({ type: 'start' }); // 环节 0 改成 30s 正计时
+    let s = engine.snapshot();
+    expect(s.timers.aff?.remainingMs).toBe(0); // 已耗从 0 起，而不是总时长
+    expect(s.timers.aff?.startedAt).toBe(clock.now());
+
+    clock.advance(45_000); // 超过原定 30s
+    s = engine.snapshot();
+    expect(remainingOf(s.timers.aff!, clock.now())).toBe(45_000);
+    engine.tick(clock.now());
+    expect(engine.snapshot().currentStageIndex).toBe(0); // 正计时不自动推进
+  });
+
+  it('暂停后恢复从已耗处接着走，绝不把已计时的时间清零', () => {
+    const { engine, clock } = makeEngine();
+    engine.command({ type: 'loadTemplate', templateId: 'quick-test' });
+    asCountUp(engine);
+    engine.command({ type: 'start' });
+    clock.advance(40_000);
+    expect(engine.command({ type: 'pause' }).ok).toBe(true);
+
+    let s = engine.snapshot();
+    expect(s.timers.aff?.remainingMs).toBe(40_000); // 固化的是已耗
+    expect(s.timers.aff?.startedAt).toBeNull();
+
+    clock.advance(10_000); // 暂停期间不增长
+    expect(engine.command({ type: 'resume' }).ok).toBe(true);
+    s = engine.snapshot();
+    expect(s.timers.aff?.startedAt).toBe(clock.now() - 40_000); // 续跑锚点
+    expect(remainingOf(s.timers.aff!, clock.now())).toBe(40_000);
+
+    clock.advance(5_000);
+    expect(remainingOf(engine.snapshot().timers.aff!, clock.now())).toBe(45_000); // 40s + 5s，而非归零
+  });
+});
+
+describe('指令入口兜底', () => {
+  it('未知指令返回失败，而不是抛异常或返回 undefined', () => {
+    const { engine } = makeEngine();
+    const result = engine.command({ type: 'nope' } as unknown as MatchCommand);
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('未知指令');
+  });
+
+  it('畸形 payload（null / undefined / 缺 type）同样返回失败', () => {
+    const { engine } = makeEngine();
+    expect(engine.command(null as unknown as MatchCommand).ok).toBe(false);
+    expect(engine.command(undefined as unknown as MatchCommand).ok).toBe(false);
+    expect(engine.command({} as unknown as MatchCommand).ok).toBe(false);
   });
 });

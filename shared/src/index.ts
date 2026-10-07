@@ -5,3 +5,8 @@
  */
 export * from './types/debate.js';
 export * from './templates.js';
+export * from './clock.js';
+export * from './cues.js';
+export * from './scoring.js';
+export * from './stages.js';
+export * from './config.js';

@@ -12,12 +12,15 @@
   "dependencies": {
     "@arco-design/web-vue": "^2.57.0",
     "@debate/shared": "workspace:*",
+    "gsap": "^3.15.0",
     "pinia": "^2.3.0",
     "socket.io-client": "^4.8.1",
+    "sortablejs": "^1.15.7",
     "vue": "^3.5.13",
     "vue-router": "^4.5.0"
   },
   "devDependencies": {
+    "@types/sortablejs": "^1.15.9",
     "@vitejs/plugin-vue": "^5.2.1",
     "typescript": "^5.7.2",
     "vite": "^6.0.7",

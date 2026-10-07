@@ -5,7 +5,9 @@
  * 1. GameStatus 单向流转：idle → configured → running ⇄ paused → finished；
  * 2. 环节索引只增不减（nextStage / 归零自动推进均只向前）；
  * 3. 计时的剩余时间一律由 timer 模块从 targetEndTime 反推，引擎不维护倒数数字；
- * 4. 所有命令经本引擎校验合法流转后才落地，非法命令返回错误、状态不变。
+ * 4. 所有命令经本引擎校验合法流转后才落地，非法命令返回错误、状态不变；
+ * 5. 状态变更统一经 changed() 出口——广播与落盘共用同一触发点，
+ *    不存在“只广播不落盘”或“只落盘不广播”的分支。
  */
 import type {
   CommandResult,
@@ -14,23 +16,47 @@ import type {
   Judge,
   MatchCommand,
   MatchConfig,
+  PublishedScores,
   Score,
   Side,
   StageConfig,
+  TimerState,
 } from '@debate/shared';
-import { findTemplate } from '@debate/shared';
+import { aggregateScores, findTemplate, validateConfigPatch, validateStages } from '@debate/shared';
 import { createTimer, expireTimer, isDue, pauseTimer, remainingOf, startTimer } from './timer.js';
 
 export type EngineEvent =
   | { type: 'stateChanged' }
-  | { type: 'warn'; side: Side; thresholdSec: number };
+  | { type: 'warn'; side: Side; thresholdSec: number }
+  | { type: 'judgeJoined'; judge: Judge }
+  | { type: 'scoreSubmitted'; score: Score; matchId: string };
+
+/** 落盘载荷：线协议状态快照 + 不进入线协议的内部量 */
+export interface EnginePersistPayload {
+  state: GameState;
+  /** 已触发的预警键（`stageIndex:side:threshold`），恢复后据此避免重复播报 */
+  firedWarns: string[];
+}
+
+/** 从库中恢复一场比赛所需的全部数据 */
+export interface EngineRestoreData {
+  config: MatchConfig;
+  status: GameStatus;
+  stages: StageConfig[];
+  currentStageIndex: number;
+  timers: Partial<Record<Side, TimerState>>;
+  activeSpeaker: Side | null;
+  firedWarns: string[];
+  judges: Judge[];
+  scores: Score[];
+}
 
 interface EngineState {
   config: MatchConfig;
   status: GameStatus;
   stages: StageConfig[];
   currentStageIndex: number;
-  timers: Partial<Record<Side, import('@debate/shared').TimerState>>;
+  timers: Partial<Record<Side, TimerState>>;
   activeSpeaker: Side | null;
   scoreProgress: string[];
 }
@@ -45,12 +71,23 @@ export class GameEngine {
   /** 已触发的预警：`${stageIndex}:${side}:${threshold}`，防止重复播报 */
   private firedWarns = new Set<string>();
   private onEvent: (e: EngineEvent) => void;
+  private onPersist: (payload: EnginePersistPayload) => void;
   private now: () => number;
   private seq = 0;
 
-  constructor(opts: { now?: () => number; onEvent?: (e: EngineEvent) => void } = {}) {
+  constructor(
+    opts: {
+      now?: () => number;
+      onEvent?: (e: EngineEvent) => void;
+      /** 落盘钩子：每次状态变更时调用，engine 是唯一写入触发点 */
+      onPersist?: (payload: EnginePersistPayload) => void;
+      /** 启动恢复：从库中读出的比赛（running 会被降级为 paused） */
+      restore?: EngineRestoreData;
+    } = {},
+  ) {
     this.now = opts.now ?? (() => Date.now());
     this.onEvent = opts.onEvent ?? (() => {});
+    this.onPersist = opts.onPersist ?? (() => {});
     this.state = {
       config: {
         matchId: `m-${this.nextId()}`,
@@ -69,6 +106,7 @@ export class GameEngine {
       activeSpeaker: null,
       scoreProgress: [],
     };
+    if (opts.restore) this.hydrate(opts.restore);
   }
 
   // ==================== 对外快照 ====================
@@ -82,18 +120,66 @@ export class GameEngine {
       timers: { ...this.state.timers },
       activeSpeaker: this.state.activeSpeaker,
       scoreProgress: [...this.state.scoreProgress],
+      // 未公布时恒为 null：分数内容绝不随广播外泄
+      published: this.publishedScores(),
       serverTime: this.now(),
     };
+  }
+
+  // ==================== 落盘与恢复 ====================
+
+  /** 落盘载荷：与广播给客户端的快照同源，外加不进入线协议的内部量 */
+  persistPayload(): EnginePersistPayload {
+    return { state: this.snapshot(), firedWarns: [...this.firedWarns] };
+  }
+
+  /** 立即落盘一次（启动时用，确保持久层里存在活跃场次行） */
+  persistNow(): void {
+    this.onPersist(this.persistPayload());
+  }
+
+  /**
+   * 用库中数据恢复比赛。
+   *
+   * 关键策略：落盘时状态为 running 的场次，恢复后一律冻结为 paused——
+   * 服务端中断期间墙钟照走，但比赛时间不该被停机吃掉，
+   * 剩余量取“最后一次落盘”的固化值（误差 ≤ 心跳窗口），由主席确认后再「恢复」。
+   */
+  private hydrate(data: EngineRestoreData): void {
+    this.state = {
+      config: data.config,
+      status: data.status === 'running' ? 'paused' : data.status,
+      stages: data.stages,
+      currentStageIndex: data.currentStageIndex,
+      timers: { ...data.timers },
+      activeSpeaker: data.activeSpeaker,
+      scoreProgress: [],
+    };
+    this.firedWarns = new Set(data.firedWarns);
+    this.judges.clear();
+    this.scores.clear();
+    for (const judge of data.judges) this.judges.set(judge.id, judge);
+    for (const score of data.scores) {
+      this.scores.set(`${score.judgeId}:${score.stageId}:${score.side}`, score);
+      // scoreProgress 是纯派生量：谁提交过评分从评分表反推即可，不必单独落盘
+      if (!this.state.scoreProgress.includes(score.judgeId)) this.state.scoreProgress.push(score.judgeId);
+    }
   }
 
   // ==================== 指令入口 ====================
 
   command(cmd: MatchCommand): CommandResult {
+    // 运行期兜底：Socket 传来的 JSON 不受类型约束，非法指令必须返回失败而不是抛异常
+    if (cmd == null || typeof (cmd as { type?: unknown }).type !== 'string') {
+      return this.fail('非法指令：缺少 type');
+    }
     switch (cmd.type) {
       case 'loadTemplate':
         return this.loadTemplate(cmd.templateId);
       case 'setConfig':
         return this.setConfig(cmd.config);
+      case 'setStages':
+        return this.setStages(cmd.stages);
       case 'start':
         return this.start();
       case 'pause':
@@ -110,6 +196,8 @@ export class GameEngine {
         return this.finish();
       case 'reset':
         return this.reset();
+      default:
+        return this.fail(`未知指令：${String((cmd as { type: unknown }).type)}`);
     }
   }
 
@@ -131,11 +219,49 @@ export class GameEngine {
     return { ok: true };
   }
 
-  /** 修改比赛配置：仅 idle / configured */
-  private setConfig(patch: Partial<MatchConfig>): CommandResult {
+  /**
+   * 整段替换环节序列：仅 idle / configured 可用（开赛后赛制冻结）。
+   *
+   * id 处理规则（关键）：带 id 且能在现有环节里找到的，**保留原 id**——
+   * 已提交的评分按 stageId 关联，换 id 会让分数与环节脱钩；
+   * 新增环节由服务端分配新 id；被删环节的评分自然失效
+   * （aggregateScores 只统计仍在赛制内的环节）。
+   */
+  private setStages(input: unknown): CommandResult {
+    if (this.state.status !== 'idle' && this.state.status !== 'configured') {
+      return this.fail('比赛已开始，无法修改赛制环节');
+    }
+    const validated = validateStages(input);
+    if (!validated.ok) return this.fail(validated.error);
+
+    const existing = new Set(this.state.stages.map((s) => s.id));
+    this.state.stages = validated.stages.map((stage, index) => ({
+      ...stage,
+      id: stage.id && existing.has(stage.id) ? stage.id : `st-${this.nextId()}`,
+      order: index + 1,
+    }));
+    this.state.status = 'configured';
+    this.state.currentStageIndex = -1;
+    this.state.timers = {};
+    this.state.activeSpeaker = null;
+    this.changed();
+    return { ok: true };
+  }
+
+  /**
+   * 修改比赛配置：仅 idle / configured 可用。
+   *
+   * 必须走白名单校验：matchId / entryCode 不在白名单内——
+   * 前者决定落盘行与恢复，后者是评委准入凭证，都不该被一条配置指令改掉。
+   */
+  private setConfig(input: unknown): CommandResult {
     if (this.state.status !== 'idle' && this.state.status !== 'configured') {
       return this.fail('比赛已开始，无法修改比赛配置');
     }
+    const validated = validateConfigPatch(input);
+    if (!validated.ok) return this.fail(validated.error);
+    const patch = validated.patch;
+
     this.state.config = {
       ...this.state.config,
       ...patch,
@@ -154,7 +280,7 @@ export class GameEngine {
    */
   private start(): CommandResult {
     if (this.state.status === 'configured') {
-      if (this.state.stages.length === 0) return this.fail('请先载入赛制模板');
+      if (this.state.stages.length === 0) return this.fail('赛制环节为空，请先载入模板或添加环节');
       this.state.status = 'running';
       this.state.currentStageIndex = 0;
       this.setupStage(this.state.stages[0]);
@@ -310,7 +436,45 @@ export class GameEngine {
     if (!name.trim()) return { ok: false, error: '请填写姓名' };
     const judge: Judge = { id: `j-${this.nextId()}`, matchId: this.state.config.matchId, name: name.trim() };
     this.judges.set(judge.id, judge);
+    // 评委入场不广播状态（其余端无需感知），但必须落盘——判分行依赖它的外键
+    this.onEvent({ type: 'judgeJoined', judge });
     return { ok: true, judge };
+  }
+
+  /**
+   * 评委续期：页面刷新 / 断线重连后凭 judgeId 找回自己的会话。
+   * 仅当该评委属于当前活跃场次时有效——reset 之后旧 judgeId 一律失效。
+   */
+  resumeJudge(judgeId: string): { ok: boolean; error?: string; judge?: Judge; scores?: Score[] } {
+    const judge = this.judges.get(judgeId);
+    if (!judge) return { ok: false, error: '评委会话不存在，请重新入场' };
+    if (judge.matchId !== this.state.config.matchId) return { ok: false, error: '比赛已重置，请重新入场' };
+    return { ok: true, judge, scores: this.scoresOf(judgeId) };
+  }
+
+  /** 某评委已提交的全部评分（只回传给本人，绝不下发给其他端） */
+  scoresOf(judgeId: string): Score[] {
+    return [...this.scores.values()].filter((s) => s.judgeId === judgeId);
+  }
+
+  // ==================== 总分与胜负 ====================
+
+  /**
+   * 计算当前成绩汇总（与是否公布无关，供内部与主席端预览使用）。
+   *
+   * 口径：每个环节先对**所有评委**取平均，再乘该环节权重求和：
+   *   weighted(side) = Σ_环节( avg_评委(分数) × 环节权重 )
+   * - 只统计至少有一份评分的环节；未评分环节不计入，也不按 0 分惩罚；
+   * - 返回的永远是汇总值，不含任何单个评委的分数。
+   */
+  computeTotals(): PublishedScores {
+    // 口径实现在 shared/src/scoring.ts：引擎与赛后导出共用同一份，避免算出差值
+    return aggregateScores(this.state.stages, [...this.scores.values()]);
+  }
+
+  /** 对外暴露的成绩：仅主席公布后才随快照下发 */
+  publishedScores(): PublishedScores | null {
+    return this.state.config.scoreVisibility === 'published' ? this.computeTotals() : null;
   }
 
   submitScore(judgeId: string, stageId: string, side: Side, value: number): CommandResult {
@@ -323,10 +487,12 @@ export class GameEngine {
       return this.fail(`分数需在 ${min}~${max} 之间`);
     }
     const key = `${judgeId}:${stageId}:${side}`;
-    this.scores.set(key, { judgeId, stageId, side, value, updatedAt: this.now() });
+    const score: Score = { judgeId, stageId, side, value, updatedAt: this.now() };
+    this.scores.set(key, score);
     if (!this.state.scoreProgress.includes(judgeId)) {
       this.state.scoreProgress.push(judgeId);
     }
+    this.onEvent({ type: 'scoreSubmitted', score, matchId: this.state.config.matchId });
     this.changed();
     return { ok: true };
   }
@@ -344,6 +510,8 @@ export class GameEngine {
     if (!stage) return;
 
     let dirty = false;
+    // 预警会改变 firedWarns（内部量）：需要落盘，但不改变广播语义（不额外广播 game:state）
+    let warnsChanged = false;
 
     // 1. 预警 + 到期
     for (const side of SIDES) {
@@ -356,6 +524,7 @@ export class GameEngine {
           const key = `${this.state.currentStageIndex}:${side}:${threshold}`;
           if (remainMs <= threshold * 1000 && !this.firedWarns.has(key)) {
             this.firedWarns.add(key);
+            warnsChanged = true;
             this.onEvent({ type: 'warn', side, thresholdSec: threshold });
           }
         }
@@ -394,7 +563,12 @@ export class GameEngine {
       }
     }
 
-    if (dirty) this.changed();
+    if (dirty) {
+      this.changed(); // 已含落盘
+    } else if (warnsChanged) {
+      // 只有预警状态变化：落盘但不广播（广播语义保持与原实现一致）
+      this.persistNow();
+    }
   }
 
   // ==================== 内部辅助 ====================
@@ -413,11 +587,11 @@ export class GameEngine {
     this.state.activeSpeaker = null;
     if (stage.type === 'dual_alternating') {
       this.state.timers = {
-        aff: createTimer(stage.durationMs),
-        neg: createTimer(stage.durationMs),
+        aff: createTimer(stage.durationMs, stage.timerKind),
+        neg: createTimer(stage.durationMs, stage.timerKind),
       };
     } else {
-      this.state.timers = { [stage.side!]: createTimer(stage.durationMs) };
+      this.state.timers = { [stage.side!]: createTimer(stage.durationMs, stage.timerKind) };
     }
   }
 
@@ -452,8 +626,10 @@ export class GameEngine {
     return this.state.timers[stage.side!]?.status === 'expired';
   }
 
+  /** 状态变更唯一出口：广播与落盘共用，二者不可能不同步 */
   private changed(): void {
     this.onEvent({ type: 'stateChanged' });
+    this.persistNow();
   }
 
   private fail(error: string): CommandResult {

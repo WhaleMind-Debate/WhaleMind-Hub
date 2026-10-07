@@ -2,18 +2,20 @@
 /**
  * 评委打分端（移动/平板端）
  * - 入场码加入（无账号体系）；
+ * - 会话持久化：judgeId 存 localStorage，刷新 / 断线重连后自动向服务端续期；
+ *   配合服务端 SQLite 落盘，评委端和服务端任一侧重启都不丢已提交评分；
  * - 分环节给正反双方打分（Slider + 数字输入双通道）；
  * - 触控热区红线：所有可点控件高度 ≥ 48px。
  */
 import { computed, onMounted, ref } from 'vue';
 import { Message } from '@arco-design/web-vue';
-import type { Judge, Side } from '@/types/debate';
+import type { Judge, Score, Side } from '@/types/debate';
 import { useDebateStore } from '@/stores/debateStore';
 import { useSocket } from '@/composables/useSocket';
 import { useMasterClock, formatMs } from '@/composables/useMasterClock';
 
 const store = useDebateStore();
-const { connect, judgeJoin, submitScore } = useSocket();
+const { connect, judgeJoin, judgeResume, submitScore } = useSocket();
 const { tick, remainingOf } = useMasterClock();
 
 const joinName = ref('');
@@ -22,7 +24,59 @@ const joining = ref(false);
 const judge = ref<Judge | null>(null);
 const scores = ref<Record<string, number>>({});
 
-onMounted(() => connect());
+/** 本地会话记录：只存 judgeId，凭它向服务端续期（服务端才是权威） */
+const SESSION_KEY = 'whalemind.judge.session.v1';
+
+function readSession(): string | null {
+  try {
+    return localStorage.getItem(SESSION_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function writeSession(judgeId: string): void {
+  try {
+    localStorage.setItem(SESSION_KEY, judgeId);
+  } catch {
+    /* 隐私模式等 localStorage 不可用：退化为不续期，不影响本次打分 */
+  }
+}
+
+function clearSession(): void {
+  try {
+    localStorage.removeItem(SESSION_KEY);
+  } catch {
+    /* 同上 */
+  }
+}
+
+/** 用服务端回传的“本人评分”回填滑杆，避免刷新后显示中位值被误提交 */
+function applyMyScores(list: Score[] | undefined): void {
+  if (!list?.length) return;
+  const next = { ...scores.value };
+  for (const s of list) next[`${s.stageId}:${s.side}`] = s.value;
+  scores.value = next;
+}
+
+onMounted(async () => {
+  connect();
+  await resumeSession();
+});
+
+/** 刷新 / 重连后尝试续期；服务端判定会话失效则清掉本地记录回到入场页 */
+async function resumeSession(): Promise<void> {
+  const judgeId = readSession();
+  if (!judgeId) return;
+  const res = await judgeResume({ judgeId });
+  if (res.ok && res.judge) {
+    judge.value = res.judge;
+    applyMyScores(res.myScores);
+    Message.success(`欢迎回来，${res.judge.name}评委`);
+  } else {
+    clearSession();
+  }
+}
 
 async function doJoin() {
   joining.value = true;
@@ -30,6 +84,7 @@ async function doJoin() {
     const res = await judgeJoin({ name: joinName.value, entryCode: joinCode.value });
     if (res.ok && res.judge) {
       judge.value = res.judge;
+      writeSession(res.judge.id);
       Message.success(`欢迎，${res.judge.name}评委`);
     } else {
       Message.error(res.error ?? '加入失败');
@@ -37,6 +92,15 @@ async function doJoin() {
   } finally {
     joining.value = false;
   }
+}
+
+/** 换人：清掉本地会话回到入场页（服务端仍保留该评委已提交的评分） */
+function doLeave(): void {
+  clearSession();
+  judge.value = null;
+  scores.value = {};
+  joinName.value = '';
+  joinCode.value = '';
 }
 
 const currentStage = computed(() => store.currentStage);
@@ -95,7 +159,10 @@ function timerText(side: Side): string {
     <div v-else class="panel">
       <div class="bar">
         <span>{{ judge.name }} 评委</span>
-        <a-tag :color="store.connected ? 'green' : 'red'">{{ store.connected ? '已连接' : '重连中…' }}</a-tag>
+        <a-space>
+          <a-tag :color="store.connected ? 'green' : 'red'">{{ store.connected ? '已连接' : '重连中…' }}</a-tag>
+          <a-button size="small" @click="doLeave">换人</a-button>
+        </a-space>
       </div>
 
       <a-empty v-if="!currentStage" description="等待比赛开始…" />

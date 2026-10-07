@@ -18,6 +18,11 @@ export default defineConfig({
         target: 'http://localhost:3000',
         ws: true,
       },
+      // 赛后查询 / 赛制模板 CRUD 等 HTTP 接口同样代理，避免浏览器直连跨域
+      '/api': {
+        target: 'http://localhost:3000',
+        changeOrigin: true,
+      },
     },
   },
 });

@@ -10,12 +10,19 @@
  */
 import type { TimerKind, TimerState } from '@debate/shared';
 
-/** 创建一个未启动的计时器 */
-export function createTimer(totalMs: number): TimerState {
+/**
+ * 创建一个未启动的计时器。
+ *
+ * remainingMs 的语义随 timerKind 而异：
+ * - countdown：剩余毫秒，初始为总时长；
+ * - countUp：**已耗毫秒**（暂停/恢复要靠它续上），初始为 0。
+ *   早先两者都写 totalMs，导致正计时环节未启动时显示总时长、暂停恢复后归零。
+ */
+export function createTimer(totalMs: number, kind: TimerKind = 'countdown'): TimerState {
   return {
     status: 'idle',
     totalMs,
-    remainingMs: totalMs,
+    remainingMs: kind === 'countUp' ? 0 : totalMs,
     targetEndTime: null,
     startedAt: null,
   };
@@ -24,14 +31,15 @@ export function createTimer(totalMs: number): TimerState {
 /**
  * 启动（或恢复）计时器：
  * - countdown：targetEndTime = now + remainingMs，剩余时间一律由目标点反推；
- * - countUp：记录 startedAt = now，已耗时间由 now - startedAt 反推，永不到期。
+ * - countUp：startedAt = now - remainingMs（此处 remainingMs 是"已耗毫秒"），
+ *   这样暂停后恢复会从已计时的地方接着走，而不是把已耗时间清零；永不到期。
  */
 export function startTimer(timer: TimerState, now: number, kind: TimerKind): TimerState {
   return {
     ...timer,
     status: 'running',
     targetEndTime: kind === 'countdown' ? now + timer.remainingMs : null,
-    startedAt: kind === 'countUp' ? now : null,
+    startedAt: kind === 'countUp' ? now - timer.remainingMs : null,
   };
 }
 
