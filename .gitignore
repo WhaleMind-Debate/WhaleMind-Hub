@@ -2,3 +2,19 @@ node_modules/
 dist/
 *.log
 .DS_Store
+
+# SQLite 落盘（server/data/debate.db 及其 WAL 附属文件）
+server/data/
+*.db
+*.db-wal
+*.db-shm
+
+# 迁移期噪声（勿入库）
+.git.bak-migration/
+oc_sk_*.txt
+
+# 嵌套的历史仓库副本（git 历史已并入根仓库，此目录待清理）
+WhaleMind-Hub/
+
+# 会话与编辑器
+.zcode/
