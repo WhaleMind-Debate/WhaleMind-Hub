@@ -32,6 +32,17 @@ export type TimerKind = 'countdown' | 'countUp';
 /** 辩方（正/反） */
 export type Side = 'aff' | 'neg';
 
+/**
+ * 辩手（结构化「辩位 + 姓名」）
+ * - position：辩位，如“一辩”“二辩”“结辩”
+ * - name：姓名，如“李四”
+ * 用于大屏「辩位 · 姓名 · 发言中」显示与自由辩轮换发言。
+ */
+export interface Speaker {
+  position: string;
+  name: string;
+}
+
 /** 计时器个体状态 */
 export type TimerStatus = 'idle' | 'running' | 'paused' | 'expired';
 
@@ -93,6 +104,11 @@ export interface StageConfig {
   soundId: string | null;
   /** 环节说明文字（大屏展示用） */
   description: string | null;
+  /**
+   * 单向环节（single）绑定的发言人：赛前在控制台指定，大屏显示“谁在讲”。
+   * 自由辩（dual_alternating）恒为 null，发言人按 Side 从名单轮换/手动指定实时推。
+   */
+  speakerName: string | null;
 }
 
 /**
@@ -115,6 +131,7 @@ export interface StageInput {
   weight: number;
   soundId: string | null;
   description: string | null;
+  speakerName: string | null;
 }
 
 /** 自定义赛制模板（存 SQLite，可跨场次复用） */
@@ -148,6 +165,8 @@ export interface SideDisplay {
   color: string;
   /** 队徽 URL（assets 上传后填入，可空） */
   logoUrl: string | null;
+  /** 辩手名单（有序：一辩…n辩，结构化「辩位+姓名」）。自由辩轮换/手动指定发言时取用；可为空 */
+  speakers: Speaker[];
 }
 
 /** 评分刻度（每场可配置） */
@@ -164,6 +183,10 @@ export interface MatchConfig {
   name: string;
   /** 辩题（大屏展示） */
   topic: string;
+  /** 正方观点/立场（大屏顶栏红条；空则大屏回退显示 topic）。与 Speaker.position（辩位）无关 */
+  affStance: string;
+  /** 反方观点/立场（大屏顶栏蓝条；空则大屏回退显示 topic） */
+  negStance: string;
   aff: SideDisplay;
   neg: SideDisplay;
   scoreScale: ScoreScale;
@@ -230,6 +253,12 @@ export interface GameState {
   timers: Partial<Record<Side, TimerState>>;
   /** dual_alternating 当前发言方（active 且消耗时间的一方） */
   activeSpeaker: Side | null;
+  /**
+   * 当前发言人（辩位+姓名）。
+   * - single 环节：取 stage.speakerName + 该方名单里匹配的辩位（匹配不到只显示姓名）
+   * - dual_alternating：按 activeSpeaker 从名单轮换/手动指定；名单空则 null（大屏只显示到“哪一方”）
+   */
+  currentSpeaker: Speaker | null;
   /** 已提交评分的 judgeId 集合（进度监控用，不含分数内容） */
   scoreProgress: string[];
   /**
@@ -256,7 +285,7 @@ export type MatchCommand =
   | { type: 'pause' }
   | { type: 'resume' }
   | { type: 'nextStage' }
-  | { type: 'switchSpeaker' }
+  | { type: 'switchSpeaker'; speakerName?: string }
   | { type: 'publishScores' }
   | { type: 'finish' }
   /** 重置为全新比赛（新开 matchId/入场码，回到 idle），任意状态可用 */

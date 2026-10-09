@@ -317,3 +317,134 @@ describe('指令入口兜底', () => {
     expect(engine.command({} as unknown as MatchCommand).ok).toBe(false);
   });
 });
+
+describe('发言人推导（currentSpeaker）', () => {
+  /** 载入快速赛制并写入双方辩手名单 */
+  function setupRoster(engine: GameEngine): void {
+    engine.command({ type: 'loadTemplate', templateId: 'quick-test' });
+    const cfg = engine.snapshot().config;
+    engine.command({
+      type: 'setConfig',
+      config: {
+        aff: { ...cfg.aff, speakers: [{ position: '一辩', name: '甲一' }, { position: '二辩', name: '甲二' }] },
+        neg: { ...cfg.neg, speakers: [{ position: '一辩', name: '乙一' }, { position: '二辩', name: '乙二' }] },
+      },
+    });
+  }
+
+  /** 推进到自由辩论（quick-test 环节 2）并开赛 */
+  function enterFreeDebate(engine: GameEngine): void {
+    engine.command({ type: 'start' });
+    engine.command({ type: 'nextStage' });
+    engine.command({ type: 'nextStage' });
+  }
+
+  it('自由辩按名单轮换：同方再次接麦时轮到下一位', () => {
+    const { engine } = makeEngine();
+    setupRoster(engine);
+    enterFreeDebate(engine);
+
+    // 首发言方（aff）从名单第 1 位起
+    expect(engine.snapshot().currentSpeaker).toEqual({ position: '一辩', name: '甲一' });
+
+    engine.command({ type: 'switchSpeaker' }); // → neg 第 1 位
+    expect(engine.snapshot().currentSpeaker).toEqual({ position: '一辩', name: '乙一' });
+
+    engine.command({ type: 'switchSpeaker' }); // → aff 第 2 位（轮换游标推进）
+    expect(engine.snapshot().currentSpeaker).toEqual({ position: '二辩', name: '甲二' });
+
+    engine.command({ type: 'switchSpeaker' }); // → neg 第 2 位
+    expect(engine.snapshot().currentSpeaker).toEqual({ position: '二辩', name: '乙二' });
+
+    engine.command({ type: 'switchSpeaker' }); // → aff 回到第 1 位（环绕）
+    expect(engine.snapshot().currentSpeaker).toEqual({ position: '一辩', name: '甲一' });
+  });
+
+  it('手动指定接麦人优先于轮换；不在名单内则回退轮换', () => {
+    const { engine } = makeEngine();
+    setupRoster(engine);
+    enterFreeDebate(engine);
+
+    // 指定 neg 的「乙二」接麦（跳过轮换的乙一）
+    expect(engine.command({ type: 'switchSpeaker', speakerName: '乙二' }).ok).toBe(true);
+    expect(engine.snapshot().currentSpeaker).toEqual({ position: '二辩', name: '乙二' });
+
+    // 指定一个不在名单内的名字 → 回退轮换（aff 下一位）
+    expect(engine.command({ type: 'switchSpeaker', speakerName: '不存在' }).ok).toBe(true);
+    expect(engine.snapshot().currentSpeaker).toEqual({ position: '二辩', name: '甲二' });
+  });
+
+  it('名单为空时 currentSpeaker 为 null（大屏只显示到“哪一方”），不报错', () => {
+    const { engine } = makeEngine();
+    engine.command({ type: 'loadTemplate', templateId: 'quick-test' }); // 默认无名单
+    enterFreeDebate(engine);
+
+    const s = engine.snapshot();
+    expect(s.activeSpeaker).toBe('aff');
+    expect(s.currentSpeaker).toBeNull();
+
+    expect(engine.command({ type: 'switchSpeaker' }).ok).toBe(true);
+    expect(engine.snapshot().currentSpeaker).toBeNull();
+  });
+
+  it('单向环节取环节绑定的发言人（speakerName）', () => {
+    const { engine } = makeEngine();
+    setupRoster(engine);
+    // 把 quick-test 环节 0（正方立论）绑定到「甲二」
+    const raw = engine as unknown as { state: { stages: { speakerName: string | null }[] } };
+    raw.state.stages[0].speakerName = '甲二';
+
+    engine.command({ type: 'start' });
+    const s = engine.snapshot();
+    expect(s.currentSpeaker).toEqual({ position: '二辩', name: '甲二' });
+  });
+
+  it('单向环节绑定的名字不在名单内时，退化为只带姓名、不带辩位', () => {
+    const { engine } = makeEngine();
+    setupRoster(engine);
+    const raw = engine as unknown as { state: { stages: { speakerName: string | null }[] } };
+    raw.state.stages[0].speakerName = '外卡选手';
+
+    engine.command({ type: 'start' });
+    expect(engine.snapshot().currentSpeaker).toEqual({ position: '', name: '外卡选手' });
+  });
+
+  it('单向环节未绑定发言人时 currentSpeaker 为 null', () => {
+    const { engine } = makeEngine();
+    setupRoster(engine);
+    engine.command({ type: 'start' }); // 环节 0 默认 speakerName: null
+    expect(engine.snapshot().currentSpeaker).toBeNull();
+  });
+
+  it('发言方用尽自动交接时，currentSpeaker 同步轮换到接棒方（人方不错位）', () => {
+    const { engine, clock } = makeEngine();
+    setupRoster(engine);
+    enterFreeDebate(engine); // aff 先发言，currentSpeaker=甲一
+
+    // 推进到反方发言（乙一），然后让反方 60s 用尽 → 自动交接回正方
+    engine.command({ type: 'switchSpeaker' });
+    expect(engine.snapshot().currentSpeaker?.name).toBe('乙一');
+    clock.advance(60_001);
+    engine.tick(clock.now());
+
+    const s = engine.snapshot();
+    expect(s.activeSpeaker).toBe('aff'); // 反方耗尽，正方接力
+    // 关键回归：发言人必须跟着交接轮换到正方（甲二），而不是滞留在反方（乙一）
+    expect(s.currentSpeaker).toEqual({ position: '二辩', name: '甲二' });
+  });
+
+  it('reset 后轮换游标清零，新场从名单第 1 位重新轮换', () => {
+    const { engine } = makeEngine();
+    setupRoster(engine);
+    enterFreeDebate(engine);
+    engine.command({ type: 'switchSpeaker' }); // aff→neg（乙一），游标推进
+    engine.command({ type: 'switchSpeaker' }); // neg→aff（甲二），游标推进
+
+    expect(engine.command({ type: 'reset' }).ok).toBe(true);
+
+    // 新场：载入+开赛+进自由辩后，首发言方应从第 1 位起（而不是带着旧游标取到甲二）
+    setupRoster(engine);
+    enterFreeDebate(engine);
+    expect(engine.snapshot().currentSpeaker).toEqual({ position: '一辩', name: '甲一' });
+  });
+});

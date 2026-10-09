@@ -19,6 +19,7 @@ const stages = (): StageInput[] => [
     weight: 1,
     soundId: 'bell',
     description: null,
+    speakerName: null,
   },
 ];
 

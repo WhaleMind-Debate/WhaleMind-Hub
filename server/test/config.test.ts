@@ -5,7 +5,7 @@
 import { describe, expect, it } from 'vitest';
 import { CONFIG_LIMITS, validateConfigPatch } from '@debate/shared';
 
-const side = { teamName: '北京大学', title: '辩手', color: '#e5484d', logoUrl: null };
+const side = { teamName: '北京大学', title: '辩手', color: '#e5484d', logoUrl: null, speakers: [] };
 
 describe('validateConfigPatch', () => {
   it('合法补丁通过', () => {
@@ -59,5 +59,43 @@ describe('validateConfigPatch', () => {
     expect(validateConfigPatch(null).ok).toBe(false);
     expect(validateConfigPatch([]).ok).toBe(false);
     expect(validateConfigPatch('x').ok).toBe(false);
+  });
+
+  it('辩手名单：合法「辩位+姓名」通过，姓名空/超长/超员被拒', () => {
+    const good = validateConfigPatch({
+      aff: { ...side, speakers: [{ position: '一辩', name: '张三' }, { position: '', name: '李四' }] },
+    });
+    expect(good.ok).toBe(true);
+    if (good.ok) expect(good.patch.aff?.speakers).toEqual([{ position: '一辩', name: '张三' }, { position: '', name: '李四' }]);
+
+    // 姓名为空
+    expect(validateConfigPatch({ aff: { ...side, speakers: [{ position: '一辩', name: '   ' }] } }).ok).toBe(false);
+    // 姓名超长
+    expect(
+      validateConfigPatch({ aff: { ...side, speakers: [{ position: '', name: 'x'.repeat(CONFIG_LIMITS.maxSpeakerNameLength + 1) }] } }).ok,
+    ).toBe(false);
+    // 辩位超长
+    expect(
+      validateConfigPatch({ aff: { ...side, speakers: [{ position: 'x'.repeat(CONFIG_LIMITS.maxSpeakerPositionLength + 1), name: 'a' }] } }).ok,
+    ).toBe(false);
+    // 超员
+    const many = Array.from({ length: CONFIG_LIMITS.maxSpeakers + 1 }, (_, i) => ({ position: '', name: `s${i}` }));
+    expect(validateConfigPatch({ aff: { ...side, speakers: many } }).ok).toBe(false);
+    // 非数组
+    expect(validateConfigPatch({ aff: { ...side, speakers: 'x' } }).ok).toBe(false);
+  });
+
+  it('辩手名单缺省/为空数组时归一为 []', () => {
+    const r = validateConfigPatch({ aff: side });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.patch.aff?.speakers).toEqual([]);
+  });
+
+  it('两方观点：可为空（回退辩题），超长被拒', () => {
+    expect(validateConfigPatch({ affStance: '短剧的发展有利于行业' }).ok).toBe(true);
+    expect(validateConfigPatch({ negStance: '' }).ok).toBe(true);
+    expect(validateConfigPatch({ affStance: '   ' }).ok).toBe(true);
+    expect(validateConfigPatch({ affStance: 'x'.repeat(CONFIG_LIMITS.maxStanceLength + 1) }).ok).toBe(false);
+    expect(validateConfigPatch({ negStance: 123 as unknown }).ok).toBe(false);
   });
 });

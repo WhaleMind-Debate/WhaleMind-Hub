@@ -25,6 +25,7 @@ function stage(
     weight: extra.weight ?? 1,
     soundId: extra.soundId ?? 'bell',
     description: extra.description ?? null,
+    speakerName: extra.speakerName ?? null,
   };
 }
 

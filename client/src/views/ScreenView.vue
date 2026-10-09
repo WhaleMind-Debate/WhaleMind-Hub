@@ -22,6 +22,17 @@ const audio = useStageAudio();
 const currentStage = computed(() => store.currentStage);
 const isDual = computed(() => currentStage.value?.type === 'dual_alternating');
 
+/** 顶栏红蓝立场条文案：两方观点，空则回退显示辩题 */
+const affStance = computed(() => store.config?.affStance?.trim() || store.config?.topic || '辩题待定');
+const negStance = computed(() => store.config?.negStance?.trim() || store.config?.topic || '辩题待定');
+
+/** 当前发言人「辩位 · 姓名」；取不到显示空（大屏只落到“哪一方”） */
+function speakerText(): string {
+  const sp = store.state?.currentSpeaker;
+  if (!sp) return '';
+  return sp.position ? `${sp.position} · ${sp.name}` : sp.name;
+}
+
 /** 预警脉冲的目标元素：自由辩按方取，单向计时只有一个面板 */
 const panels: Partial<Record<Side, HTMLElement | null>> = {};
 const singlePanel = ref<HTMLElement | null>(null);
@@ -100,11 +111,22 @@ function isWarn(side: Side): boolean {
       {{ !audio.supported ? '🔇 无提示音' : audio.muted ? '🔇 已静音' : '🔔 提示音开' }}
     </button>
 
-    <!-- 辩题 -->
-    <header class="topic">
-      <div class="topic-text">{{ store.config?.topic ?? '辩论赛' }}</div>
-      <div class="match-name">{{ store.config?.name ?? '' }}</div>
+    <!-- 顶栏红蓝立场条：左红（正方观点+队名）｜右蓝（反方观点+队名） -->
+    <header class="stance-bar">
+      <div class="stance-side stance-aff" :style="{ background: store.config?.aff.color ?? '#c82828' }">
+        <span class="stance-badge">正方</span>
+        <span class="stance-text">{{ affStance }}</span>
+        <span class="stance-team">{{ store.config?.aff.teamName ?? '' }}</span>
+      </div>
+      <div class="stance-side stance-neg" :style="{ background: store.config?.neg.color ?? '#1e5bb8' }">
+        <span class="stance-team">{{ store.config?.neg.teamName ?? '' }}</span>
+        <span class="stance-text">{{ negStance }}</span>
+        <span class="stance-badge">反方</span>
+      </div>
     </header>
+
+    <!-- 比赛名称 -->
+    <div class="match-name">{{ store.config?.name ?? '' }}</div>
 
     <!-- 当前环节 -->
     <section class="stage">
@@ -129,7 +151,11 @@ function isWarn(side: Side): boolean {
         >
           <div class="team">{{ side === 'aff' ? store.config?.aff.teamName : store.config?.neg.teamName }}</div>
           <div class="time">{{ timerText(side) }}</div>
-          <div class="speaker-tag">{{ store.activeSpeaker === side ? '发言中' : '' }}</div>
+          <div class="speaker-tag">
+            <template v-if="store.activeSpeaker === side">
+              <span v-if="speakerText()" class="speaker-name">{{ speakerText() }} · </span>发言中
+            </template>
+          </div>
         </div>
       </template>
       <template v-else-if="currentStage && currentStage.side">
@@ -139,6 +165,12 @@ function isWarn(side: Side): boolean {
             {{ currentStage.side === 'aff' ? store.config?.aff.teamName : store.config?.neg.teamName }}
           </div>
           <div class="time-huge">{{ timerText(currentStage.side) }}</div>
+          <div class="speaker-tag">
+            <template v-if="currentStage.speakerName">
+              <span class="speaker-name">{{ currentStage.speakerName }} · </span>
+            </template>
+            正在发言
+          </div>
         </div>
       </template>
     </section>
@@ -190,18 +222,48 @@ function isWarn(side: Side): boolean {
   padding: 3vh 4vw;
   box-sizing: border-box;
 }
-.topic {
-  text-align: center;
+/* 顶栏红蓝立场条：左右双色块，左红正方｜右蓝反方 */
+.stance-bar {
+  display: flex;
+  width: 100%;
+  border-radius: 1.2vh;
+  overflow: hidden;
+  min-height: 9vh;
 }
-.topic-text {
-  font-size: 4.5vh;
+.stance-side {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 1.5vw;
+  padding: 1.5vh 2vw;
+  color: #fff;
   font-weight: 700;
-  letter-spacing: 0.02em;
+}
+.stance-neg {
+  justify-content: flex-end;
+}
+.stance-badge {
+  font-size: 3.2vh;
+  font-weight: 800;
+  border: 0.35vh solid rgba(255, 255, 255, 0.9);
+  border-radius: 0.8vh;
+  padding: 0.4vh 1.2vw;
+  white-space: nowrap;
+}
+.stance-text {
+  font-size: 2.6vh;
+  line-height: 1.3;
+}
+.stance-team {
+  font-size: 2.2vh;
+  opacity: 0.92;
+  white-space: nowrap;
 }
 .match-name {
+  text-align: center;
   font-size: 2.2vh;
   color: #94a3b8;
-  margin-top: 0.5vh;
+  margin: 1vh 0 0;
 }
 .stage {
   text-align: center;
@@ -250,12 +312,21 @@ function isWarn(side: Side): boolean {
   font-weight: 800;
   font-variant-numeric: tabular-nums;
   line-height: 1.1;
+  /* LED 数码管质感：等宽数字 + 描边发光（零外部字体依赖） */
+  letter-spacing: 0.04em;
+  text-shadow:
+    0 0 1vh rgba(245, 247, 250, 0.35),
+    0 0 4vh rgba(245, 247, 250, 0.18);
 }
 .time-huge {
   font-size: 22vh;
   font-weight: 800;
   font-variant-numeric: tabular-nums;
   line-height: 1.1;
+  letter-spacing: 0.04em;
+  text-shadow:
+    0 0 1.5vh rgba(245, 247, 250, 0.35),
+    0 0 6vh rgba(245, 247, 250, 0.18);
 }
 .timer-single {
   border: 0.5vh solid #334155;
@@ -268,6 +339,9 @@ function isWarn(side: Side): boolean {
   font-size: 2.5vh;
   color: #34d399;
   min-height: 3vh;
+}
+.speaker-name {
+  font-weight: 700;
 }
 .compare {
   display: flex;

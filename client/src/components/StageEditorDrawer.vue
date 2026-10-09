@@ -9,8 +9,9 @@
  */
 import { computed, reactive, ref, watch } from 'vue';
 import { Message } from '@arco-design/web-vue';
-import { BUILTIN_SOUND_IDS, STAGE_LIMITS, type Side } from '@/types/debate';
+import { BUILTIN_SOUND_IDS, STAGE_LIMITS, type Side, type Speaker } from '@/types/debate';
 import { useStageAudio } from '@/composables/useStageAudio';
+import { useDebateStore } from '@/stores/debateStore';
 import { blankDraft, draftToInput, formatDuration, type StageDraft } from '@/stages/draft';
 
 const props = defineProps<{
@@ -27,6 +28,7 @@ const emit = defineEmits<{
 }>();
 
 const audio = useStageAudio();
+const store = useDebateStore();
 const formRef = ref();
 
 const SOUND_LABEL: Record<string, string> = {
@@ -38,6 +40,7 @@ const SOUND_LABEL: Record<string, string> = {
 /** Arco 的 a-select/a-option 不接受 null 值，用哨兵值表达“不设置”，提交时再映射回 null */
 const NO_PROTECT = '__none__';
 const NO_SOUND = '__none__';
+const NO_SPEAKER = '__none__';
 
 const form = reactive({
   name: '',
@@ -50,6 +53,7 @@ const form = reactive({
   soundId: 'bell' as string,
   description: '',
   protectedSide: NO_PROTECT as string,
+  speakerName: NO_SPEAKER as string,
 });
 
 /** 当前正在编辑的草稿本体（key / id 从这里带回去） */
@@ -57,6 +61,13 @@ let editing: StageDraft | null = null;
 
 const isDual = computed(() => form.type === 'dual_alternating');
 const durationText = computed(() => formatDuration(Math.round(form.durationSec * 1000)));
+
+/** 当前归属方的辩手名单（单向环节的发言人下拉取值；自由辩隐藏此项） */
+const speakerOptions = computed<Speaker[]>(() => {
+  const config = store.config;
+  if (!config) return [];
+  return config[form.side]?.speakers ?? [];
+});
 
 const rules = {
   name: [{ required: true, message: '请填写环节名称' }],
@@ -76,6 +87,7 @@ function loadFrom(stage: StageDraft | null): void {
   form.soundId = source.soundId ?? NO_SOUND;
   form.description = source.description ?? '';
   form.protectedSide = source.protectedSide ?? NO_PROTECT;
+  form.speakerName = source.speakerName ?? NO_SPEAKER;
 }
 
 watch(
@@ -125,6 +137,8 @@ async function submit(): Promise<void> {
     warnThresholds: thresholds,
     soundId: form.soundId === NO_SOUND ? null : form.soundId,
     description: form.description.trim() === '' ? null : form.description.trim(),
+    speakerName:
+      form.type === 'single' && form.speakerName !== NO_SPEAKER ? form.speakerName : null,
   };
 
   if (!draft.name) {
@@ -164,6 +178,18 @@ defineExpose({ draftToInput });
           <a-radio value="aff">正方</a-radio>
           <a-radio value="neg">反方</a-radio>
         </a-radio-group>
+      </a-form-item>
+
+      <a-form-item v-if="!isDual" label="本环节发言人">
+        <a-select v-model="form.speakerName" allow-search>
+          <a-option :value="NO_SPEAKER">不指定</a-option>
+          <a-option v-for="sp in speakerOptions" :key="sp.name" :value="sp.name">
+            {{ sp.position ? `${sp.position} · ${sp.name}` : sp.name }}
+          </a-option>
+        </a-select>
+        <template #extra>
+          从{{ form.side === 'aff' ? '正方' : '反方' }}辩手名单取（先在「比赛信息」录入名单）；大屏显示“谁在讲”。
+        </template>
       </a-form-item>
 
       <a-form-item v-else label="保护时间">

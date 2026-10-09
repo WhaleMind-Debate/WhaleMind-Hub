@@ -19,6 +19,7 @@ import type {
   PublishedScores,
   Score,
   Side,
+  Speaker,
   StageConfig,
   TimerState,
 } from '@debate/shared';
@@ -34,6 +35,8 @@ export type EngineEvent =
 /** 落盘载荷：线协议状态快照 + 不进入线协议的内部量 */
 export interface EnginePersistPayload {
   state: GameState;
+  /** 自由辩各辩方的轮换游标（不进入线协议，随场次落盘） */
+  speakerCursor: Partial<Record<Side, number>>;
   /** 已触发的预警键（`stageIndex:side:threshold`），恢复后据此避免重复播报 */
   firedWarns: string[];
 }
@@ -46,6 +49,8 @@ export interface EngineRestoreData {
   currentStageIndex: number;
   timers: Partial<Record<Side, TimerState>>;
   activeSpeaker: Side | null;
+  currentSpeaker: Speaker | null;
+  speakerCursor: Partial<Record<Side, number>>;
   firedWarns: string[];
   judges: Judge[];
   scores: Score[];
@@ -58,6 +63,10 @@ interface EngineState {
   currentStageIndex: number;
   timers: Partial<Record<Side, TimerState>>;
   activeSpeaker: Side | null;
+  /** 当前发言人（辩位+姓名）；单向环节取环节绑定，自由辩按名单轮换/手动指定 */
+  currentSpeaker: Speaker | null;
+  /** 自由辩各辩方的轮换游标（下一个该发言的名单下标），随场次落盘 */
+  speakerCursor: Partial<Record<Side, number>>;
   scoreProgress: string[];
 }
 
@@ -93,8 +102,10 @@ export class GameEngine {
         matchId: `m-${this.nextId()}`,
         name: '辩论赛',
         topic: '辩题待定',
-        aff: { teamName: '正方', title: '辩手', color: '#e5484d', logoUrl: null },
-        neg: { teamName: '反方', title: '辩手', color: '#3b82f6', logoUrl: null },
+        affStance: '',
+        negStance: '',
+        aff: { teamName: '正方', title: '辩手', color: '#e5484d', logoUrl: null, speakers: [] },
+        neg: { teamName: '反方', title: '辩手', color: '#3b82f6', logoUrl: null, speakers: [] },
         scoreScale: { min: 0, max: 100, step: 1 },
         scoreVisibility: 'hidden',
         entryCode: String(Math.floor(100000 + Math.random() * 900000)),
@@ -104,6 +115,8 @@ export class GameEngine {
       currentStageIndex: -1,
       timers: {},
       activeSpeaker: null,
+      currentSpeaker: null,
+      speakerCursor: {},
       scoreProgress: [],
     };
     if (opts.restore) this.hydrate(opts.restore);
@@ -119,6 +132,7 @@ export class GameEngine {
       currentStageIndex: this.state.currentStageIndex,
       timers: { ...this.state.timers },
       activeSpeaker: this.state.activeSpeaker,
+      currentSpeaker: this.state.currentSpeaker,
       scoreProgress: [...this.state.scoreProgress],
       // 未公布时恒为 null：分数内容绝不随广播外泄
       published: this.publishedScores(),
@@ -130,7 +144,7 @@ export class GameEngine {
 
   /** 落盘载荷：与广播给客户端的快照同源，外加不进入线协议的内部量 */
   persistPayload(): EnginePersistPayload {
-    return { state: this.snapshot(), firedWarns: [...this.firedWarns] };
+    return { state: this.snapshot(), speakerCursor: { ...this.state.speakerCursor }, firedWarns: [...this.firedWarns] };
   }
 
   /** 立即落盘一次（启动时用，确保持久层里存在活跃场次行） */
@@ -153,6 +167,8 @@ export class GameEngine {
       currentStageIndex: data.currentStageIndex,
       timers: { ...data.timers },
       activeSpeaker: data.activeSpeaker,
+      currentSpeaker: data.currentSpeaker ?? null,
+      speakerCursor: { ...(data.speakerCursor ?? {}) },
       scoreProgress: [],
     };
     this.firedWarns = new Set(data.firedWarns);
@@ -189,7 +205,7 @@ export class GameEngine {
       case 'nextStage':
         return this.nextStage();
       case 'switchSpeaker':
-        return this.switchSpeaker();
+        return this.switchSpeaker(cmd.speakerName);
       case 'publishScores':
         return this.publishScores();
       case 'finish':
@@ -346,7 +362,7 @@ export class GameEngine {
    * 切换发言方（仅 dual_alternating 环节）：
    * 上一方暂停、下一方立即启动；受保护方只接麦不计时。
    */
-  private switchSpeaker(): CommandResult {
+  private switchSpeaker(manualName?: string): CommandResult {
     if (this.state.status !== 'running') return this.fail('仅比赛进行中可切换发言方');
     const stage = this.currentStage();
     if (!stage || stage.type !== 'dual_alternating') return this.fail('当前环节不是自由辩论类环节');
@@ -373,6 +389,11 @@ export class GameEngine {
     }
 
     this.state.activeSpeaker = next;
+
+    // 发言人：优先手动指定（名单内按姓名精确匹配），否则按名单轮换
+    const manual = manualName != null ? this.speakerByName(next, manualName) : null;
+    this.state.currentSpeaker = manual ?? this.nextSpeakerByRotation(next);
+
     // 受保护方：接麦但计时器不启动（发言不消耗时间）
     if (next !== protectedSide && nextTimer) {
       this.state.timers[next] = startTimer(nextTimer, now, stage.timerKind);
@@ -421,6 +442,8 @@ export class GameEngine {
     this.state.currentStageIndex = -1;
     this.state.timers = {};
     this.state.activeSpeaker = null;
+    this.state.currentSpeaker = null;
+    this.state.speakerCursor = {};
     this.state.scoreProgress = [];
     this.scores.clear();
     this.judges.clear();
@@ -557,6 +580,8 @@ export class GameEngine {
         const otherTimer = this.state.timers[other];
         if (otherTimer && otherTimer.status !== 'expired' && other !== stage.protectedSide) {
           this.state.activeSpeaker = other;
+          // 交接时同步轮换发言人，避免大屏出现“人在甲方、计时在乙方”的错位
+          this.state.currentSpeaker = this.nextSpeakerByRotation(other);
           this.state.timers[other] = startTimer(otherTimer, now, stage.timerKind);
           dirty = true;
         }
@@ -603,11 +628,13 @@ export class GameEngine {
     if (stage.type === 'dual_alternating') {
       const first = this.firstSpeaker(stage);
       this.state.activeSpeaker = first;
+      this.state.currentSpeaker = this.nextSpeakerByRotation(first);
       const t = this.state.timers[first];
       if (t && first !== stage.protectedSide) {
         this.state.timers[first] = startTimer(t, now, stage.timerKind);
       }
     } else {
+      this.state.currentSpeaker = this.speakerFromStageBinding(stage);
       const t = this.state.timers[stage.side!];
       if (t) this.state.timers[stage.side!] = startTimer(t, now, stage.timerKind);
     }
@@ -615,6 +642,48 @@ export class GameEngine {
 
   private firstSpeaker(stage: StageConfig): Side {
     return stage.protectedSide === 'aff' ? 'neg' : 'aff';
+  }
+
+  /** 取某一方的辩手名单 */
+  private rosterOf(side: Side): Speaker[] {
+    return this.state.config[side].speakers ?? [];
+  }
+
+  /**
+   * 单向环节的发言人：优先取环节绑定的姓名，去名单里匹配辩位；
+   * 名单里找不到（或未绑定）则退化为只带姓名、不带辩位的 Speaker。
+   */
+  private speakerFromStageBinding(stage: StageConfig): Speaker | null {
+    const boundName = stage.speakerName?.trim();
+    if (!boundName) return null;
+    const side = stage.side;
+    const roster = side ? this.rosterOf(side) : [];
+    const match = roster.find((s) => s.name === boundName);
+    return match ? { ...match } : { position: '', name: boundName };
+  }
+
+  /**
+   * 自由辩某一方的下一位发言人（默认轮换）：
+   * 按该方名单的轮换游标取下一位并推进游标；名单为空返回 null（只显示到“哪一方”）。
+   */
+  private nextSpeakerByRotation(side: Side): Speaker | null {
+    const roster = this.rosterOf(side);
+    if (roster.length === 0) return null;
+    const cursor = this.state.speakerCursor[side] ?? 0;
+    const speaker = roster[cursor % roster.length];
+    this.state.speakerCursor[side] = (cursor + 1) % roster.length;
+    return { ...speaker };
+  }
+
+  /**
+   * 自由辩手动指定发言人：在该方名单里按姓名精确匹配。
+   * 匹配不到返回 null（调用方决定是否回退轮换）。
+   */
+  private speakerByName(side: Side, name: string): Speaker | null {
+    const trimmed = name.trim();
+    if (!trimmed) return null;
+    const found = this.rosterOf(side).find((s) => s.name === trimmed);
+    return found ? { ...found } : null;
   }
 
   /** 环节是否完成：single=归属方到期；dual=所有非保护方到期 */

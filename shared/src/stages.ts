@@ -24,6 +24,7 @@ export const STAGE_LIMITS = {
   maxWarnThresholds: 6,
   maxNameLength: 60,
   maxDescriptionLength: 200,
+  maxSpeakerNameLength: 20,
 } as const;
 
 export type StageValidationResult = { ok: true; stages: StageInput[] } | { ok: false; error: string };
@@ -114,6 +115,16 @@ export function validateStages(input: unknown): StageValidationResult {
       return fail(`${label}的说明不能超过 ${STAGE_LIMITS.maxDescriptionLength} 个字`);
     }
 
+    // 单向环节绑定发言人（自由辩恒为 null，发言人由名单轮换/手动指定实时推）
+    let speakerName: string | null = null;
+    if (type === 'single' && typeof raw.speakerName === 'string' && raw.speakerName.trim() !== '') {
+      const sn = raw.speakerName.trim();
+      if (sn.length > STAGE_LIMITS.maxSpeakerNameLength) {
+        return fail(`${label}的发言人不能超过 ${STAGE_LIMITS.maxSpeakerNameLength} 个字`);
+      }
+      speakerName = sn;
+    }
+
     stages.push({
       id: typeof raw.id === 'string' && raw.id !== '' ? raw.id : undefined,
       name,
@@ -127,6 +138,7 @@ export function validateStages(input: unknown): StageValidationResult {
       weight,
       soundId,
       description: descriptionRaw === '' ? null : descriptionRaw,
+      speakerName,
     });
   }
 

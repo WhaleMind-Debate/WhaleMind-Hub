@@ -17,6 +17,7 @@ const stage = (id: string, order: number, weight = 1): StageConfig => ({
   weight,
   soundId: 'bell',
   description: null,
+  speakerName: null,
 });
 
 const score = (judgeId: string, stageId: string, side: Side, value: number): ScorableScore => ({

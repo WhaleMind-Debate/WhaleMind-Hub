@@ -47,6 +47,28 @@ async function run(command: Parameters<typeof sendCommand>[0], successText?: str
   return true;
 }
 
+// ==================== 自由辩：切换发言方 + 指定接麦人 ====================
+
+/** 手动指定的下一位接麦人；空串 = 默认按名单轮换 */
+const nextSpeakerName = ref('');
+
+/** 接麦方（即将发言的一方）的辩手名单，供下拉选择 */
+const incomingRoster = computed(() => {
+  const config = store.config;
+  if (!config) return [];
+  const cur = store.activeSpeaker;
+  const incoming = cur == null ? 'aff' : cur === 'aff' ? 'neg' : 'aff';
+  return config[incoming]?.speakers ?? [];
+});
+
+async function switchSpeaker(): Promise<void> {
+  const speakerName = nextSpeakerName.value.trim();
+  const ok = await run(
+    speakerName ? { type: 'switchSpeaker', speakerName } : { type: 'switchSpeaker' },
+  );
+  if (ok) nextSpeakerName.value = '';
+}
+
 // ==================== 赛制模板 ====================
 
 const customTemplates = ref<SavedTemplate[]>([]);
@@ -275,18 +297,20 @@ function timerText(side: Side): string {
 <template>
   <div class="admin">
     <a-layout>
-      <a-layout-header class="header">
-        <h2>主席控制台</h2>
-        <a-space>
-          <a-tag :color="store.connected ? 'green' : 'red'">
-            {{ store.connected ? '已连接' : '连接中…' }}
-          </a-tag>
-          <a-tag color="arcoblue">状态：{{ store.status }}</a-tag>
-          <a-tag v-if="store.config">入场码：{{ store.config.entryCode }}</a-tag>
-          <a-tag v-if="dirty" color="orange">赛制未保存</a-tag>
-          <a-tag :color="clockStatus.color">{{ clockStatus.text }}</a-tag>
-        </a-space>
-      </a-layout-header>
+      <a-page-header class="header" :subtitle="store.config?.name ?? ''">
+        <template #title>主席控制台</template>
+        <template #extra>
+          <a-space wrap>
+            <a-tag :color="store.connected ? 'green' : 'red'">
+              {{ store.connected ? '已连接' : '连接中…' }}
+            </a-tag>
+            <a-tag color="arcoblue">状态：{{ store.status }}</a-tag>
+            <a-tag v-if="store.config">入场码：{{ store.config.entryCode }}</a-tag>
+            <a-tag v-if="dirty" color="orange">赛制未保存</a-tag>
+            <a-tag :color="clockStatus.color">{{ clockStatus.text }}</a-tag>
+          </a-space>
+        </template>
+      </a-page-header>
 
       <a-layout-content class="content">
         <!-- 赛制模板 -->
@@ -341,9 +365,20 @@ function timerText(side: Side): string {
             <a-button size="large" @click="run({ type: 'pause' })">暂停</a-button>
             <a-button size="large" @click="run({ type: 'resume' })">恢复</a-button>
             <a-button size="large" @click="run({ type: 'nextStage' })">下一环节</a-button>
-            <a-button size="large" status="warning" :disabled="!isDual" @click="run({ type: 'switchSpeaker' })">
+            <a-button size="large" status="warning" :disabled="!isDual" @click="switchSpeaker()">
               切换发言方
             </a-button>
+            <a-select
+              v-model="nextSpeakerName"
+              :disabled="!isDual"
+              placeholder="指定接麦人（留空=轮换）"
+              allow-clear
+              style="width: 210px"
+            >
+              <a-option v-for="sp in incomingRoster" :key="sp.name" :value="sp.name">
+                {{ sp.position ? `${sp.position} · ${sp.name}` : sp.name }}
+              </a-option>
+            </a-select>
             <a-button size="large" @click="run({ type: 'publishScores' })">公布比分</a-button>
             <a-button size="large" status="danger" @click="run({ type: 'finish' })">结束比赛</a-button>
             <a-popconfirm content="将归档本场并生成新入场码，确定重置？" @ok="run({ type: 'reset' })">
@@ -427,14 +462,12 @@ function timerText(side: Side): string {
   height: 100%;
 }
 .header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
   background: #fff;
-  border-bottom: 1px solid var(--color-border);
+  padding: 12px 24px 0;
 }
-.header h2 {
-  margin: 0;
+.header :deep(.arco-page-header-header) {
+  flex-wrap: wrap;
+  gap: 8px;
 }
 .content {
   padding: 16px;

@@ -38,6 +38,7 @@ export function draftFromStage(stage: StageConfig): StageDraft {
     weight: stage.weight,
     soundId: stage.soundId,
     description: stage.description,
+    speakerName: stage.speakerName,
   };
 }
 
@@ -55,6 +56,7 @@ export function blankDraft(): StageDraft {
     weight: 1,
     soundId: 'bell',
     description: null,
+    speakerName: null,
   };
 }
 

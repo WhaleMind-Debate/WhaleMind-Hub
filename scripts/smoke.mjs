@@ -73,9 +73,22 @@ await new Promise((r) => admin.on('connect', r));
 // 0. 重置为全新比赛（隔离上一轮脏状态）
 await run({ type: 'reset' }, '重置');
 
-// 1. 载入快速测试模板 → 开赛
+// 1. 载入快速测试模板 → 写入辩手名单 → 开赛
 let res = await run({ type: 'loadTemplate', templateId: 'quick-test' }, '载入模板');
 check('载入模板', res.ok);
+res = await run(
+  {
+    type: 'setConfig',
+    config: {
+      affStance: '短剧的发展有利于影视行业',
+      negStance: '短剧的发展不利于影视行业',
+      aff: { teamName: '正方', title: '辩手', color: '#e5484d', logoUrl: null, speakers: [{ position: '一辩', name: '甲一' }, { position: '二辩', name: '甲二' }] },
+      neg: { teamName: '反方', title: '辩手', color: '#3b82f6', logoUrl: null, speakers: [{ position: '一辩', name: '乙一' }, { position: '二辩', name: '乙二' }] },
+    },
+  },
+  '写入名单与观点',
+);
+check('写入双方观点+辩手名单', res.ok);
 res = await run({ type: 'start' }, '开始计时');
 check('开始计时', res.ok);
 
@@ -93,6 +106,7 @@ await run({ type: 'nextStage' }, '环节1');
 await run({ type: 'nextStage' }, '环节2');
 const s2 = await waitState(screen, getLatest, (s) => s.currentStageIndex === 2 && s.activeSpeaker === 'aff', '进入自由辩论');
 check('自由辩论正方先发言', s2.activeSpeaker === 'aff' && s2.timers.aff.status === 'running');
+check('首发言人=正方一辩（名单轮换起点）', s2.currentSpeaker?.name === '甲一');
 
 await new Promise((r) => setTimeout(r, 1500)); // 正方消耗 1.5s
 await run({ type: 'switchSpeaker' }, '切换发言方');
@@ -101,6 +115,15 @@ check('切换后反方 running', s3.timers.neg.status === 'running');
 check('切换后正方 paused', s3.timers.aff.status === 'paused');
 check('正方固化剩余 ≈58.5s（60s - 1.5s）', s3.timers.aff.remainingMs > 57000 && s3.timers.aff.remainingMs <= 58900);
 check('正方 paused 后 targetEndTime 清空', s3.timers.aff.targetEndTime == null);
+check('接麦人=反方一辩（乙一）', s3.currentSpeaker?.name === '乙一');
+
+// 3b. 手动指定接麦人：跳过轮换，直接指定正方二辩
+await run({ type: 'switchSpeaker', speakerName: '甲二' }, '手动指定甲二');
+const s3b = await waitState(screen, getLatest, (s) => s.currentSpeaker?.name === '甲二', '手动指定生效');
+check('手动指定接麦人优先于轮换', s3b.activeSpeaker === 'aff' && s3b.currentSpeaker?.name === '甲二');
+
+// 3c. 立场条文案下发
+check('两方观点随快照下发', s2.config.affStance === '短剧的发展有利于影视行业' && s2.config.negStance === '短剧的发展不利于影视行业');
 
 // 4. 暂停/恢复：暂停期间不消耗
 res = await run({ type: 'pause' }, '暂停');

@@ -20,6 +20,7 @@ import type {
   MatchConfig,
   Score,
   Side,
+  Speaker,
   StageConfig,
   TimerState,
 } from '@debate/shared';
@@ -37,6 +38,44 @@ export interface MatchRepositoryOptions {
 export const DEFAULT_HEARTBEAT_MS = 1000;
 
 type Row = Record<string, unknown>;
+
+/**
+ * active_speaker 列的编码格式（JSON envelope）：
+ * 存 { s: Side | null, p: Speaker | null, c: Partial<Record<Side, number>> }
+ * 旧数据（纯 "aff"/"neg"/NULL 字符串）解析时降级：side 取原值，发言人与游标为空。
+ */
+interface SpeakerColumn {
+  s: Side | null;
+  p: Speaker | null;
+  c: Partial<Record<Side, number>>;
+}
+
+function encodeSpeakerColumn(
+  activeSpeaker: Side | null,
+  currentSpeaker: Speaker | null,
+  speakerCursor: Partial<Record<Side, number>>,
+): string {
+  return JSON.stringify({ s: activeSpeaker, p: currentSpeaker, c: speakerCursor });
+}
+
+function decodeSpeakerColumn(raw: unknown): SpeakerColumn {
+  if (raw == null) return { s: null, p: null, c: {} };
+  const text = String(raw);
+  if (text.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(text) as Partial<SpeakerColumn>;
+      return {
+        s: parsed.s ?? null,
+        p: parsed.p ?? null,
+        c: parsed.c ?? {},
+      };
+    } catch {
+      return { s: null, p: null, c: {} };
+    }
+  }
+  // 旧格式：纯 Side 字符串
+  return { s: text === 'aff' || text === 'neg' ? (text as Side) : null, p: null, c: {} };
+}
 
 /** 场次概览（历史列表用） */
 export interface MatchSummary {
@@ -253,7 +292,9 @@ export class MatchRepository {
       stages: parseJson<StageConfig[]>(row.stages, []),
       currentStageIndex: Number(row.current_stage_index ?? -1),
       timers: parseJson<Partial<Record<Side, TimerState>>>(row.timers, {}),
-      activeSpeaker: (row.active_speaker == null ? null : String(row.active_speaker)) as Side | null,
+      activeSpeaker: decodeSpeakerColumn(row.active_speaker).s,
+      currentSpeaker: decodeSpeakerColumn(row.active_speaker).p,
+      speakerCursor: decodeSpeakerColumn(row.active_speaker).c,
       firedWarns: parseJson<string[]>(row.fired_warns, []),
       judges,
       scores,
@@ -283,7 +324,7 @@ export class MatchRepository {
         JSON.stringify(state.config),
         JSON.stringify(state.stages),
         JSON.stringify(timers),
-        state.activeSpeaker,
+        encodeSpeakerColumn(state.activeSpeaker, state.currentSpeaker, payload.speakerCursor),
         JSON.stringify(payload.firedWarns),
         now,
         now,

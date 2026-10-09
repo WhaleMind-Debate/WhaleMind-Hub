@@ -34,6 +34,7 @@ const toInput = (s: StageConfig): StageInput => ({
   weight: s.weight,
   soundId: s.soundId,
   description: s.description,
+  speakerName: s.speakerName,
 });
 
 describe('validateStages 环节校验', () => {
