@@ -30,6 +30,15 @@ const lastError = ref('');
 /** 赛制是否只在 idle / configured 可编辑（开赛后冻结） */
 const editable = computed(() => store.status === 'idle' || store.status === 'configured');
 
+/** 标签页：赛前配置 / 赛中操控 */
+const activeTab = ref<'prep' | 'live'>('prep');
+
+/** 开始计时并切到赛中操控页（贴合比赛流程：配好即开赛） */
+async function startMatch(): Promise<void> {
+  const ok = await run({ type: 'start' });
+  if (ok) activeTab.value = 'live';
+}
+
 onMounted(async () => {
   connect();
   await refreshTemplates();
@@ -313,124 +322,136 @@ function timerText(side: Side): string {
       </a-page-header>
 
       <a-layout-content class="content">
-        <!-- 赛制模板 -->
-        <a-card title="赛制模板" class="card">
-          <a-space wrap>
-            <a-select v-model="selectedTemplate" style="width: 280px" :disabled="!editable">
-              <a-option v-for="opt in templateOptions" :key="opt.value" :value="opt.value" :label="opt.label" />
-            </a-select>
-            <a-button type="primary" :disabled="!editable" @click="loadSelectedTemplate">载入模板</a-button>
-            <a-button :disabled="draft.length === 0" @click="openSaveTemplate">另存为模板</a-button>
-            <a-popconfirm
-              v-if="selectedIsCustom"
-              content="删除该自定义模板？已载入的比赛不受影响。"
-              @ok="removeSelectedTemplate"
-            >
-              <a-button status="danger" :disabled="!selectedIsCustom">删除模板</a-button>
-            </a-popconfirm>
-          </a-space>
-          <div class="hint">
-            内置模板来自代码，自定义模板存在服务端 SQLite，可跨场次复用（共 {{ customTemplates.length }} 个）。
-          </div>
-        </a-card>
+        <a-tabs v-model:active-key="activeTab" class="main-tabs" type="rounded" size="large">
+          <!-- ============ 赛前配置 ============ -->
+          <a-tab-pane key="prep" title="赛前配置">
+            <div class="tab-pane">
+              <!-- 赛制模板 -->
+              <a-card title="赛制模板" class="card">
+                <a-space wrap>
+                  <a-select v-model="selectedTemplate" style="width: 280px" :disabled="!editable">
+                    <a-option v-for="opt in templateOptions" :key="opt.value" :value="opt.value" :label="opt.label" />
+                  </a-select>
+                  <a-button type="primary" :disabled="!editable" @click="loadSelectedTemplate">载入模板</a-button>
+                  <a-button :disabled="draft.length === 0" @click="openSaveTemplate">另存为模板</a-button>
+                  <a-popconfirm
+                    v-if="selectedIsCustom"
+                    content="删除该自定义模板？已载入的比赛不受影响。"
+                    @ok="removeSelectedTemplate"
+                  >
+                    <a-button status="danger" :disabled="!selectedIsCustom">删除模板</a-button>
+                  </a-popconfirm>
+                </a-space>
+                <div class="hint">
+                  内置模板来自代码，自定义模板存在服务端 SQLite，可跨场次复用（共 {{ customTemplates.length }} 个）。
+                </div>
+              </a-card>
 
-        <!-- 比赛信息 -->
-        <MatchInfoCard :disabled="!editable" :saving="savingConfig" @submit="saveMatchInfo" />
+              <!-- 比赛信息 -->
+              <MatchInfoCard :disabled="!editable" :saving="savingConfig" @submit="saveMatchInfo" />
 
-        <!-- 赛制环节 -->
-        <a-card title="赛制环节" class="card wide">
-          <StageTable
-            :stages="draft"
-            :disabled="!editable"
-            :current-index="store.state?.currentStageIndex ?? -1"
-            @add="addStage"
-            @edit="editStage"
-            @remove="removeStage"
-            @move="moveStage"
-            @reorder="moveStage"
-          />
-          <a-space class="stage-actions">
-            <a-button type="primary" :disabled="!editable || !dirty" :loading="savingStages" @click="saveStages">
-              保存赛制
-            </a-button>
-            <a-button :disabled="!dirty" @click="resetDraft">还原</a-button>
-            <span v-if="dirty" class="hint">有未保存的改动</span>
-          </a-space>
-        </a-card>
-
-        <!-- 计时控制 -->
-        <a-card title="计时控制" class="card">
-          <a-space wrap>
-            <a-button type="primary" size="large" @click="run({ type: 'start' })">开始 / 启动环节</a-button>
-            <a-button size="large" @click="run({ type: 'pause' })">暂停</a-button>
-            <a-button size="large" @click="run({ type: 'resume' })">恢复</a-button>
-            <a-button size="large" @click="run({ type: 'nextStage' })">下一环节</a-button>
-            <a-button size="large" status="warning" :disabled="!isDual" @click="switchSpeaker()">
-              切换发言方
-            </a-button>
-            <a-select
-              v-model="nextSpeakerName"
-              :disabled="!isDual"
-              placeholder="指定接麦人（留空=轮换）"
-              allow-clear
-              style="width: 210px"
-            >
-              <a-option v-for="sp in incomingRoster" :key="sp.name" :value="sp.name">
-                {{ sp.position ? `${sp.position} · ${sp.name}` : sp.name }}
-              </a-option>
-            </a-select>
-            <a-button size="large" @click="run({ type: 'publishScores' })">公布比分</a-button>
-            <a-button size="large" status="danger" @click="run({ type: 'finish' })">结束比赛</a-button>
-            <a-popconfirm content="将归档本场并生成新入场码，确定重置？" @ok="run({ type: 'reset' })">
-              <a-button size="large" status="warning" outline>重置比赛</a-button>
-            </a-popconfirm>
-          </a-space>
-          <a-alert v-if="lastError" type="error" :content="lastError" class="err" />
-        </a-card>
-
-        <!-- 当前环节 -->
-        <a-card title="当前环节" class="card">
-          <template v-if="currentStage">
-            <h3>{{ currentStage.name }}</h3>
-            <a-space size="large">
-              <div v-for="side in (['aff', 'neg'] as Side[])" :key="side" class="timer-box">
-                <span class="side-label">{{ store.sideLabel(side) }}</span>
-                <span class="timer-num" :class="{ active: store.activeSpeaker === side }">
-                  {{ timerText(side) }}
-                </span>
-                <a-tag v-if="store.activeSpeaker === side" color="green">发言中</a-tag>
-              </div>
-            </a-space>
-          </template>
-          <a-empty v-else description="尚未载入赛制" />
-        </a-card>
-
-        <!-- 总分预览 -->
-        <a-card title="总分（预览）" class="card">
-          <template v-if="totals">
-            <a-space size="large">
-              <div class="total-box">
-                <div class="total-label">{{ store.config?.aff.teamName ?? '正方' }}</div>
-                <div class="total-num" :class="{ lead: totals.winner === 'aff' }">{{ totals.aff.weighted.toFixed(1) }}</div>
-              </div>
-              <div class="total-box">
-                <div class="total-label">{{ store.config?.neg.teamName ?? '反方' }}</div>
-                <div class="total-num" :class="{ lead: totals.winner === 'neg' }">{{ totals.neg.weighted.toFixed(1) }}</div>
-              </div>
-            </a-space>
-            <div class="total-meta">
-              {{ totals.judgeCount }} 位评委 · 正 {{ totals.aff.scoredStages }} / 反 {{ totals.neg.scoredStages }} 个环节计分 ·
-              {{ totals.winner === null ? '暂时持平' : totals.winner === 'aff' ? '正方领先' : '反方领先' }}
+              <!-- 赛制环节 -->
+              <a-card title="赛制环节" class="card">
+                <StageTable
+                  :stages="draft"
+                  :disabled="!editable"
+                  :current-index="store.state?.currentStageIndex ?? -1"
+                  @add="addStage"
+                  @edit="editStage"
+                  @remove="removeStage"
+                  @move="moveStage"
+                  @reorder="moveStage"
+                />
+                <a-space class="stage-actions">
+                  <a-button type="primary" :disabled="!editable || !dirty" :loading="savingStages" @click="saveStages">
+                    保存赛制
+                  </a-button>
+                  <a-button :disabled="!dirty" @click="resetDraft">还原</a-button>
+                  <span v-if="dirty" class="hint">有未保存的改动</span>
+                </a-space>
+              </a-card>
             </div>
-          </template>
-          <a-empty v-else description="暂无评分" />
-          <a-space>
-            <a-button class="total-refresh" size="small" :loading="previewBusy" @click="refreshTotals">刷新</a-button>
-            <a-button class="total-refresh" size="small" :disabled="!store.config?.matchId" @click="exportCsv">
-              导出成绩 CSV
-            </a-button>
-          </a-space>
-        </a-card>
+          </a-tab-pane>
+
+          <!-- ============ 赛中操控 ============ -->
+          <a-tab-pane key="live" title="赛中操控">
+            <div class="tab-pane">
+              <!-- 计时控制：赛中最常用，置于本页顶部显眼位 -->
+              <a-card title="计时控制" class="card control-card">
+                <a-space wrap>
+                  <a-button type="primary" size="large" @click="startMatch">开始 / 启动环节</a-button>
+                  <a-button size="large" @click="run({ type: 'pause' })">暂停</a-button>
+                  <a-button size="large" @click="run({ type: 'resume' })">恢复</a-button>
+                  <a-button size="large" @click="run({ type: 'nextStage' })">下一环节</a-button>
+                  <a-button size="large" status="warning" :disabled="!isDual" @click="switchSpeaker()">
+                    切换发言方
+                  </a-button>
+                  <a-select
+                    v-model="nextSpeakerName"
+                    :disabled="!isDual"
+                    placeholder="指定接麦人（留空=轮换）"
+                    allow-clear
+                    style="width: 210px"
+                  >
+                    <a-option v-for="sp in incomingRoster" :key="sp.name" :value="sp.name">
+                      {{ sp.position ? `${sp.position} · ${sp.name}` : sp.name }}
+                    </a-option>
+                  </a-select>
+                  <a-button size="large" @click="run({ type: 'publishScores' })">公布比分</a-button>
+                  <a-button size="large" status="danger" @click="run({ type: 'finish' })">结束比赛</a-button>
+                  <a-popconfirm content="将归档本场并生成新入场码，确定重置？" @ok="run({ type: 'reset' })">
+                    <a-button size="large" status="warning" outline>重置比赛</a-button>
+                  </a-popconfirm>
+                </a-space>
+                <a-alert v-if="lastError" type="error" :content="lastError" class="err" />
+              </a-card>
+
+              <!-- 当前环节 -->
+              <a-card title="当前环节" class="card">
+                <template v-if="currentStage">
+                  <h3>{{ currentStage.name }}</h3>
+                  <a-space size="large">
+                    <div v-for="side in (['aff', 'neg'] as Side[])" :key="side" class="timer-box">
+                      <span class="side-label">{{ store.sideLabel(side) }}</span>
+                      <span class="timer-num" :class="{ active: store.activeSpeaker === side }">
+                        {{ timerText(side) }}
+                      </span>
+                      <a-tag v-if="store.activeSpeaker === side" color="green">发言中</a-tag>
+                    </div>
+                  </a-space>
+                </template>
+                <a-empty v-else description="尚未载入赛制" />
+              </a-card>
+
+              <!-- 总分预览 -->
+              <a-card title="总分（预览）" class="card">
+                <template v-if="totals">
+                  <a-space size="large">
+                    <div class="total-box">
+                      <div class="total-label">{{ store.config?.aff.teamName ?? '正方' }}</div>
+                      <div class="total-num" :class="{ lead: totals.winner === 'aff' }">{{ totals.aff.weighted.toFixed(1) }}</div>
+                    </div>
+                    <div class="total-box">
+                      <div class="total-label">{{ store.config?.neg.teamName ?? '反方' }}</div>
+                      <div class="total-num" :class="{ lead: totals.winner === 'neg' }">{{ totals.neg.weighted.toFixed(1) }}</div>
+                    </div>
+                  </a-space>
+                  <div class="total-meta">
+                    {{ totals.judgeCount }} 位评委 · 正 {{ totals.aff.scoredStages }} / 反 {{ totals.neg.scoredStages }} 个环节计分 ·
+                    {{ totals.winner === null ? '暂时持平' : totals.winner === 'aff' ? '正方领先' : '反方领先' }}
+                  </div>
+                </template>
+                <a-empty v-else description="暂无评分" />
+                <a-space>
+                  <a-button class="total-refresh" size="small" :loading="previewBusy" @click="refreshTotals">刷新</a-button>
+                  <a-button class="total-refresh" size="small" :disabled="!store.config?.matchId" @click="exportCsv">
+                    导出成绩 CSV
+                  </a-button>
+                </a-space>
+              </a-card>
+            </div>
+          </a-tab-pane>
+        </a-tabs>
       </a-layout-content>
     </a-layout>
 
@@ -470,18 +491,29 @@ function timerText(side: Side): string {
   gap: 8px;
 }
 .content {
-  padding: 16px;
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  padding: 16px 24px 24px;
+}
+.main-tabs {
+  width: 100%;
+}
+/* 标签页内容：卡片垂直流式堆叠，间距统一，不再挤在一个网格里 */
+.tab-pane {
+  display: flex;
+  flex-direction: column;
   gap: 16px;
-  align-content: start;
+  max-width: 1100px;
 }
 .card {
   min-height: 120px;
 }
-/* 环节表格较宽，占满整行 */
-.card.wide {
-  grid-column: 1 / -1;
+/* 计时控制：赛中操控页置顶、视觉更重 */
+.control-card {
+  border: 1px solid var(--primary-6);
+  box-shadow: 0 2px 12px rgba(var(--primary-6), 0.12);
+}
+.control-card :deep(.arco-card-header) {
+  background: var(--color-fill-2);
+  font-weight: 600;
 }
 .hint {
   font-size: 13px;
