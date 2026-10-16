@@ -10,7 +10,20 @@
 | 评委打分端 | `/judge` | 移动/平板，Arco（触控友好） | 入场码加入、分环节给正反双方打分，可反复修改 |
 | 大屏展示端 | `/screen` | 响应式大屏，纯 Flex/Grid | 辩题、当前环节、超大倒计时、正反对比、倒计时预警 |
 
-## 快速开始
+## 老师版：免安装双击即用（推荐）
+
+老师无需装 Node、无需 pnpm，从 GitHub Release 下载 `dist-release.zip` 后：
+
+1. 解压到任意目录（路径不要有中文/空格）
+2. 双击 `启动辩论赛系统.bat`
+3. 浏览器会自动打开主席控制台；窗口里也会显示大屏/评委端地址
+
+评委手机连同一 WiFi 访问 `http://<主席机IP>:3000/judge`（入场码显示在控制台右上角）。
+
+打包者本机一键产出分发包：`pnpm release`（= build client + server + 打包 node.exe/静态资源/启动脚本 → `dist-release/` 与 `dist-release.zip`）。数据写在包内 `data/`，随包带走；端口被占用会友好提示。
+
+<details>
+<summary>开发者版（需要改代码时用）</summary>
 
 要求：Node.js ≥ 22.5（`node:sqlite` 的最低版本，建议 24 LTS），pnpm ≥ 9。
 
@@ -21,7 +34,7 @@ pnpm test                # 服务端状态机 vitest 用例
 node scripts/smoke.mjs   # 三端联动冒烟（需先启动 server）
 ```
 
-服务端状态会自动落盘到 `server/data/debate.db`（首次启动自动创建，已 gitignore）。想跑一场“干净”的比赛就删掉该文件；设 `DB_PATH=:memory:` 可完全不落盘。
+服务端状态会自动落盘到 `server/data/debate.db`（首次启动自动创建，已 gitignore）。想跑一场”干净”的比赛就删掉该文件；设 `DB_PATH=:memory:` 可完全不落盘。
 
 打开三个窗口即可联调：
 
@@ -30,6 +43,8 @@ node scripts/smoke.mjs   # 三端联动冒烟（需先启动 server）
 - 大屏端 <http://localhost:5173/screen>（建议 F11 全屏投出）
 
 局域网多设备：client 已监听 `0.0.0.0`，评委手机连同一 WiFi 访问 `http://<主席机IP>:5173/judge`。
+
+</details>
 
 ## 工程结构
 

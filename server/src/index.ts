@@ -7,8 +7,11 @@
  * - 重启：自动恢复活跃场次；若中断时正在计时，则冻结为 paused 待主席确认。
  */
 import express from 'express';
+import { existsSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { networkInterfaces } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Server } from 'socket.io';
 import {
   aggregateScores,
@@ -236,6 +239,39 @@ app.delete('/api/templates/:templateId', (req, res) => {
   res.json({ ok: true });
 });
 
+// ==================== 生产态静态托管（单端口） ====================
+/**
+ * 把 client/dist 交给本服务同源托管：老师/评委访问 :PORT 一个端口即可，
+ * 不再需要 vite dev（:5173）与后端（:3000）两个进程。
+ * 客户端 socket.io 与 fetch 本就是同源相对路径（io() 无 URL、fetch('/api/…')），
+ * 生产产物零改动即可同源工作。
+ * 路径定位用「env 优先 + 候选探测」，兼容源码运行（server/src）与打包产物（server/dist）两种布局。
+ */
+function resolveClientDist(): string | null {
+  const candidates = [
+    process.env.CLIENT_DIST,
+    fileURLToPath(new URL('../../client/dist', import.meta.url)), // 打包产物：server/dist/server.js → root/client/dist
+    fileURLToPath(new URL('../../../client/dist', import.meta.url)), // 源码：server/src/index.ts → root/client/dist
+  ].filter((p): p is string => typeof p === 'string' && p.length > 0);
+  for (const dir of candidates) {
+    if (existsSync(join(dir, 'index.html'))) return dir;
+  }
+  return null;
+}
+
+const clientDist = resolveClientDist();
+if (clientDist) {
+  app.use(express.static(clientDist));
+  // SPA history 回退：非 /api 的 GET 一律回 index.html，刷新 /judge、/screen 不 404
+  app.use((req, res, next) => {
+    if (req.method !== 'GET' || req.path.startsWith('/api/')) return next();
+    res.sendFile(join(clientDist, 'index.html'));
+  });
+  console.log(`[debate-server] 静态托管 client/dist：${clientDist}`);
+} else {
+  // dev 模式：client 由 vite dev server 提供，这里无需托管
+}
+
 io.on('connection', (socket) => {
   // 新连接 / 重连一律先收全量快照
   socket.emit(SOCKET_EVENTS.GAME_STATE, engine.snapshot());
@@ -341,6 +377,30 @@ function shutdown(signal: string): void {
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 
+// 端口占用时给出友好提示，而不是让 Node 默认抛未捕获 EADDRINUSE 直接崩
+httpServer.on('error', (err: NodeJS.ErrnoException) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`\n[debate-server] 端口 ${PORT} 已被占用。`);
+    console.error(`[debate-server] 请关闭占用该端口的程序后重试，或用 PORT 环境变量换一个端口。`);
+    process.exit(1);
+  }
+  throw err;
+});
+
+/** 生产态自动打开浏览器（仅打包分发时由 .bat 开启，dev 不自动开以免打扰） */
+function openBrowser(): void {
+  if (process.env.OPEN_BROWSER !== '1') return;
+  const url = `http://localhost:${PORT}/admin`;
+  const cmd =
+    process.platform === 'win32'
+      ? `start "" "${url}"`
+      : process.platform === 'darwin'
+        ? `open "${url}"`
+        : `xdg-open "${url}"`;
+  // 浏览器打不开不应影响服务本身
+  void import('node:child_process').then(({ exec }) => exec(cmd, () => {}));
+}
+
 httpServer.listen(PORT, HOST, () => {
   console.log(`[debate-server] listening on http://${HOST}:${PORT}`);
   // 列出局域网访问地址，方便评委手机直连
@@ -350,4 +410,5 @@ httpServer.listen(PORT, HOST, () => {
       console.log(`[debate-server] LAN: http://${net.address}:${PORT}`);
     }
   }
+  openBrowser();
 });

@@ -1,0 +1,46 @@
+# 打 v* 标签时自动打包并发布 GitHub Release
+#
+# 产出：dist-release.zip（含自带 node.exe 的免安装分发包，老师双击 .bat 即用）。
+# 必须跑 windows runner：打包脚本复制当前 node.exe、生成 .bat，均是 Windows 目标。
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write # 创建 Release + 上传附件需要
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 先装 pnpm 再 setup-node，cache: pnpm 才认得锁文件
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24 # node:sqlite 需 ≥22.5，24 与本机一致
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install
+
+      # 打包：build client + server → 组装 node.exe/静态资源/启动脚本 → dist-release.zip
+      - name: Build and package
+        run: pnpm release
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist-release.zip
+          generate_release_notes: true
+          # 标签名即 Release 名（v*）；附件带 zip，老师从 Release 页下载

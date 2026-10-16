@@ -3,6 +3,10 @@ dist/
 *.log
 .DS_Store
 
+# 分发包产物（pnpm release 生成，不入库）
+dist-release/
+dist-release.zip
+
 # SQLite 落盘（server/data/debate.db 及其 WAL 附属文件）
 server/data/
 *.db

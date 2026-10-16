@@ -8,12 +8,20 @@
     "dev:server": "pnpm --filter @debate/server dev",
     "dev:client": "pnpm --filter @debate/client dev",
     "test": "pnpm --filter @debate/server test",
-    "typecheck": "pnpm -r typecheck"
+    "typecheck": "pnpm -r typecheck",
+    "build:client": "pnpm --filter @debate/client build",
+    "build:server": "node scripts/build-server.mjs",
+    "build": "pnpm build:client && pnpm build:server",
+    "release": "pnpm build && node scripts/package-release.mjs"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["esbuild", "vue-demi"]
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "vue-demi"
+    ]
   },
   "devDependencies": {
+    "esbuild": "^0.28.2",
     "socket.io-client": "^4.8.1"
   }
 }
