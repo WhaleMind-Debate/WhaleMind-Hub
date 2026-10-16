@@ -1,5 +1,9 @@
 # 打 v* 标签时自动打包并发布 GitHub Release
 #
+# 版本号约定（后缀区分发行通道）：
+#   v1.0.0-pre.1  → 预发布（prerelease=true，带 -pre）
+#   v1.0.0        → 正式发布
+# 更新日志：从上个 tag 到本 tag 的 conventional commit 分组生成（scripts/changelog.mjs）。
 # 产出：dist-release.zip（含自带 node.exe 的免安装分发包，老师双击 .bat 即用）。
 # 必须跑 windows runner：打包脚本复制当前 node.exe、生成 .bat，均是 Windows 目标。
 name: Release
@@ -18,6 +22,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 需要完整历史才能算 tag 区间生成 changelog
 
       # 先装 pnpm 再 setup-node，cache: pnpm 才认得锁文件
       - name: Setup pnpm
@@ -38,9 +44,26 @@ jobs:
       - name: Build and package
         run: pnpm release
 
+      # 生成更新日志：从上个 tag 到本 tag 的 commit 分组，写入 release-notes.md
+      - name: Generate changelog
+        shell: bash
+        run: node scripts/changelog.mjs "${GITHUB_REF_NAME}" > release-notes.md
+
+      # 按 tag 后缀分流：带 -pre 的建预发布，否则正式发布
+      - name: Is prerelease?
+        id: pre
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_NAME" == *-pre* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: dist-release.zip
-          generate_release_notes: true
-          # 标签名即 Release 名（v*）；附件带 zip，老师从 Release 页下载
+          body_path: release-notes.md
+          prerelease: ${{ steps.pre.outputs.prerelease }}
+          generate_release_notes: false
