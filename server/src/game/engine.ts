@@ -30,7 +30,11 @@ export type EngineEvent =
   | { type: 'stateChanged' }
   | { type: 'warn'; side: Side; thresholdSec: number }
   | { type: 'judgeJoined'; judge: Judge }
-  | { type: 'scoreSubmitted'; score: Score; matchId: string };
+  | { type: 'scoreSubmitted'; score: Score; matchId: string; previousValue: number | null }
+  /** 倒计时归零自动推进到下一环节（区别于主席手动 nextStage） */
+  | { type: 'autoAdvance'; from: number; to: number }
+  /** 自由辩发言方时间用尽，自动把发言权交给对方 */
+  | { type: 'autoHandover'; side: Side };
 
 /** 落盘载荷：线协议状态快照 + 不进入线协议的内部量 */
 export interface EnginePersistPayload {
@@ -510,14 +514,21 @@ export class GameEngine {
       return this.fail(`分数需在 ${min}~${max} 之间`);
     }
     const key = `${judgeId}:${stageId}:${side}`;
+    // 覆盖前值：审计日志用来证明“第几次改分、从多少改到多少”
+    const previous = this.scores.get(key)?.value ?? null;
     const score: Score = { judgeId, stageId, side, value, updatedAt: this.now() };
     this.scores.set(key, score);
     if (!this.state.scoreProgress.includes(judgeId)) {
       this.state.scoreProgress.push(judgeId);
     }
-    this.onEvent({ type: 'scoreSubmitted', score, matchId: this.state.config.matchId });
+    this.onEvent({ type: 'scoreSubmitted', score, matchId: this.state.config.matchId, previousValue: previous });
     this.changed();
     return { ok: true };
+  }
+
+  /** 只读查询某条评分的当前值（审计用；返回 null 表示尚未提交） */
+  peekScore(judgeId: string, stageId: string, side: Side): number | null {
+    return this.scores.get(`${judgeId}:${stageId}:${side}`)?.value ?? null;
   }
 
   // ==================== 看门狗 tick ====================
@@ -567,8 +578,10 @@ export class GameEngine {
       const next = this.state.currentStageIndex + 1;
       if (next < this.state.stages.length) {
         // 归零自动推进：环节索引只增不减；新环节计时器就绪但不自动启动
+        const from = this.state.currentStageIndex;
         this.state.currentStageIndex = next;
         this.setupStage(this.state.stages[next]);
+        this.onEvent({ type: 'autoAdvance', from, to: next });
         dirty = true;
       }
       // 最后一个环节完成：保持现状，由主席执行 finish
@@ -583,6 +596,7 @@ export class GameEngine {
           // 交接时同步轮换发言人，避免大屏出现“人在甲方、计时在乙方”的错位
           this.state.currentSpeaker = this.nextSpeakerByRotation(other);
           this.state.timers[other] = startTimer(otherTimer, now, stage.timerKind);
+          this.onEvent({ type: 'autoHandover', side: other });
           dirty = true;
         }
       }

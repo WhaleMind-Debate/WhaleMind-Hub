@@ -13,6 +13,11 @@ server/data/
 *.db-wal
 *.db-shm
 
+# 操作审计日志（运行时写入，不入库）
+# 只忽略根目录的 log/，避免误伤源码目录 server/src/log/
+/log/
+server/log/
+
 # 迁移期噪声（勿入库）
 .git.bak-migration/
 oc_sk_*.txt

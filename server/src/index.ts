@@ -34,6 +34,7 @@ import {
   type TimerWarnPayload,
 } from '@debate/shared';
 import { MatchRepository } from './db/repository.js';
+import { createAuditLog } from './log/audit.js';
 import { openDatabase } from './db/schema.js';
 import { TemplateRepository } from './db/templateRepository.js';
 import { createMonotonicClock } from './game/clock.js';
@@ -60,6 +61,21 @@ const io = new Server(httpServer, {
  */
 const clock = createMonotonicClock();
 
+// ==================== 审计日志 ====================
+
+/**
+ * 操作日志：赛后争议溯源用（谁在什么时候做了什么）。
+ * - 默认写到 <cwd>/log/YYYY-MM-DD.jsonl；分发包由 .bat 设 LOG_DIR=包内 log/
+ * - LOG_DISABLED=1 可整体关闭；LOG_RETENTION_DAYS 默认 30
+ * - 时间戳一律用 clock.now()，与 serverTime 同源
+ */
+const audit = createAuditLog({
+  dir: process.env.LOG_DIR ?? join(process.cwd(), 'log'),
+  now: clock.now,
+  retentionDays: Number(process.env.LOG_RETENTION_DAYS ?? 30),
+  enabled: process.env.LOG_DISABLED !== '1',
+});
+
 // ==================== 持久化接线 ====================
 
 const db = openDatabase();
@@ -82,6 +98,15 @@ const engine = new GameEngine({
           serverTime: clock.now(),
         };
         io.emit(SOCKET_EVENTS.TIMER_WARN, payload);
+        const ctx = stageContext();
+        audit.write({
+          type: 'system',
+          action: 'timerWarn',
+          matchId: ctx.matchId,
+          stageIndex: ctx.stageIndex,
+          stageName: ctx.stageName,
+          detail: { side: e.side, thresholdSec: e.thresholdSec },
+        });
         break;
       }
       // 评委入场不广播（其余端无需感知），只落盘——判分行依赖它的外键
@@ -91,6 +116,30 @@ const engine = new GameEngine({
       case 'scoreSubmitted':
         repo.saveScore(e.score, e.matchId);
         break;
+      case 'autoAdvance': {
+        const ctx = stageContext();
+        audit.write({
+          type: 'system',
+          action: 'autoAdvance',
+          matchId: ctx.matchId,
+          stageIndex: ctx.stageIndex,
+          stageName: ctx.stageName,
+          detail: { from: e.from, to: e.to },
+        });
+        break;
+      }
+      case 'autoHandover': {
+        const ctx = stageContext();
+        audit.write({
+          type: 'system',
+          action: 'autoHandover',
+          matchId: ctx.matchId,
+          stageIndex: ctx.stageIndex,
+          stageName: ctx.stageName,
+          detail: { side: e.side },
+        });
+        break;
+      }
     }
   },
   // 落盘与广播共用 changed() 出口，二者不可能不同步
@@ -112,6 +161,20 @@ if (restored) {
 } else {
   console.log('[debate-server] 未发现历史场次，按全新比赛启动');
 }
+
+audit.write({
+  type: 'lifecycle',
+  action: restored ? 'restoreMatch' : 'startFresh',
+  matchId: engine.snapshot().config.matchId,
+  detail: restored
+    ? {
+        status: restored.status,
+        stageIndex: restored.currentStageIndex,
+        judges: restored.judges.length,
+        scores: restored.scores.length,
+      }
+    : undefined,
+});
 
 function broadcastState(): void {
   io.emit(SOCKET_EVENTS.GAME_STATE, engine.snapshot());
@@ -273,23 +336,80 @@ if (clientDist) {
   // dev 模式：client 由 vite dev server 提供，这里无需托管
 }
 
+/** 取客户端 IP：优先反代头，其次握手地址（局域网直连时是真实 IP） */
+function clientIp(socket: { handshake: { address?: string; headers: Record<string, unknown> } }): string {
+  const fwd = socket.handshake.headers['x-forwarded-for'];
+  const first = Array.isArray(fwd) ? fwd[0] : typeof fwd === 'string' ? fwd.split(',')[0] : '';
+  return (first && first.trim()) || socket.handshake.address || 'unknown';
+}
+
+/** 当前比赛上下文（写日志用） */
+function stageContext() {
+  const s = engine.snapshot();
+  const st = s.stages[s.currentStageIndex];
+  return {
+    matchId: s.config.matchId,
+    stageIndex: s.currentStageIndex,
+    stageName: st?.name,
+    status: s.status,
+  };
+}
+
 io.on('connection', (socket) => {
+  const ip = clientIp(socket);
+  audit.write({
+    type: 'conn',
+    action: 'connect',
+    actor: { socketId: socket.id, ip },
+    detail: { userAgent: String(socket.handshake.headers['user-agent'] ?? '') },
+  });
+
+  socket.on('disconnect', (reason: string) => {
+    audit.write({
+      type: 'conn',
+      action: 'disconnect',
+      actor: { socketId: socket.id, ip },
+      detail: { reason },
+    });
+  });
+
   // 新连接 / 重连一律先收全量快照
   socket.emit(SOCKET_EVENTS.GAME_STATE, engine.snapshot());
 
   /**
    * 时钟同步：原样回带客户端的发送时刻，客户端据此算往返时延与偏移
    * （offset = serverTime - (t0+t1)/2）。无状态、可高频调用。
+   * 刻意不写审计日志：客户端每 5 秒会调一次，记了只会淹没真正的操作。
    */
   socket.on(SOCKET_EVENTS.TIME_SYNC, (payload: TimeSyncPayload, ack?: (r: TimeSyncResult) => void) => {
     ack?.({ clientTime: payload?.clientTime ?? 0, serverTime: clock.now() });
   });
 
   socket.on(SOCKET_EVENTS.MATCH_COMMAND, (payload: MatchCommandPayload, ack?: (r: CommandResult) => void) => {
+    const before = stageContext();
     const result: CommandResult = engine.command(payload.command);
     // 同时支持 ack 回调与 command:result 事件两种消费方式
     ack?.(result);
     socket.emit(SOCKET_EVENTS.COMMAND_RESULT, result);
+
+    const after = stageContext();
+    audit.write({
+      type: 'command',
+      action: payload.command?.type ?? 'unknown',
+      result: result.ok ? 'ok' : 'fail',
+      error: result.error,
+      actor: { socketId: socket.id, ip },
+      matchId: after.matchId,
+      stageIndex: after.stageIndex,
+      stageName: after.stageName,
+      detail: {
+        command: payload.command,
+        statusBefore: before.status,
+        statusAfter: after.status,
+        stageBefore: before.stageIndex,
+        stageAfter: after.stageIndex,
+      },
+    });
     // 状态变化由 engine.onEvent 统一广播；失败指令不产生广播
   });
 
@@ -298,6 +418,22 @@ io.on('connection', (socket) => {
     const body: JudgeJoinResult = result.ok
       ? { ok: true, judge: result.judge, state: engine.snapshot(), myScores: [] }
       : { ok: false, error: result.error };
+
+    audit.write({
+      type: 'judge',
+      action: 'join',
+      result: result.ok ? 'ok' : 'fail',
+      error: result.error,
+      actor: result.judge
+        ? { judgeId: result.judge.id, name: result.judge.name, socketId: socket.id, ip }
+        : { socketId: socket.id, ip },
+      matchId: stageContext().matchId,
+      detail: {
+        name: payload?.name,
+        // 入场码错误也留痕，但只记“失败”不记用户输入的错码，避免日志被凑码污染
+        entryCodeAccepted: result.ok,
+      },
+    });
     ack?.(body);
   });
 
@@ -307,6 +443,17 @@ io.on('connection', (socket) => {
     const body: JudgeResumeResult = result.ok
       ? { ok: true, judge: result.judge, state: engine.snapshot(), myScores: result.scores }
       : { ok: false, error: result.error };
+
+    audit.write({
+      type: 'judge',
+      action: 'resume',
+      result: result.ok ? 'ok' : 'fail',
+      error: result.error,
+      actor: result.judge
+        ? { judgeId: result.judge.id, name: result.judge.name, socketId: socket.id, ip }
+        : { socketId: socket.id, ip },
+      matchId: stageContext().matchId,
+    });
     ack?.(body);
   });
 
@@ -314,14 +461,37 @@ io.on('connection', (socket) => {
    * 主席端成绩预览：结果只回传给发起请求的这一个 socket，绝不进入广播。
    * 注意：系统目前没有账号体系（ADMIN_PIN 属规划中），这条通道不是安全边界，
    * 它的意义是“不主动泄露”，而不是“无法被请求”。
+   * 不写审计：只读操作，且控制台会随每次打分自动刷新。
    */
   socket.on(SOCKET_EVENTS.SCORE_PREVIEW, (_payload: unknown, ack?: (r: ScorePreviewResult) => void) => {
     ack?.({ ok: true, scores: engine.computeTotals() });
   });
 
   socket.on(SOCKET_EVENTS.SCORE_SUBMIT, (payload: ScoreSubmitPayload, ack?: (r: CommandResult) => void) => {
+    // 提交前先取旧值：upsert 会覆盖，事后无法还原“从多少改到多少”
+    const previousValue = engine.peekScore(payload.judgeId, payload.stageId, payload.side);
     const result = engine.submitScore(payload.judgeId, payload.stageId, payload.side, payload.value);
     ack?.(result);
+
+    const ctx = stageContext();
+    const stage = ctx.stageName;
+    audit.write({
+      type: 'score',
+      action: 'submit',
+      result: result.ok ? 'ok' : 'fail',
+      error: result.error,
+      actor: { judgeId: payload.judgeId, socketId: socket.id, ip },
+      matchId: ctx.matchId,
+      stageIndex: ctx.stageIndex,
+      stageName: stage,
+      detail: {
+        stageId: payload.stageId,
+        side: payload.side,
+        value: payload.value,
+        previousValue,
+      },
+    });
+
     // 进度随状态快照统一下发（scoreProgress 字段），此处保留事件名供后续增量优化
     io.emit(SOCKET_EVENTS.SCORE_PROGRESS, {
       scoreProgress: engine.snapshot().scoreProgress,
@@ -367,12 +537,23 @@ setInterval(() => {
 function shutdown(signal: string): void {
   console.log(`[debate-server] 收到 ${signal}，落盘后退出`);
   try {
+    audit.write({
+      type: 'lifecycle',
+      action: 'shutdown',
+      matchId: engine.snapshot().config.matchId,
+      detail: { signal },
+    });
+  } catch {
+    // 日志失败不阻塞退出
+  }
+  try {
     ntp?.stop();
     engine.persistNow();
     repo.close();
   } catch (err) {
     console.error('[debate-server] 退出落盘失败：', err);
   }
+  audit.close();
   process.exit(0);
 }
 process.on('SIGINT', () => shutdown('SIGINT'));

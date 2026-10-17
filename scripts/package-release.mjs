@@ -29,6 +29,7 @@ rmSync(outDir, { recursive: true, force: true });
 mkdirSync(join(outDir, 'server'), { recursive: true });
 mkdirSync(join(outDir, 'client'), { recursive: true });
 mkdirSync(join(outDir, 'data'), { recursive: true });
+mkdirSync(join(outDir, 'log'), { recursive: true });
 
 // 1. 复制 node.exe（老师机器免装 Node 的关键）
 const nodeExe = process.execPath; // 当前运行的 node.exe 绝对路径
@@ -84,6 +85,7 @@ set OPEN_BROWSER=1
 set PORT=7369
 set DB_PATH=%~dp0data\\debate.db
 set CLIENT_DIST=%~dp0client\\dist
+set LOG_DIR=%~dp0log
 
 echo.
 echo   鲸思云辩 · 辩论赛全流程系统 正在启动...
@@ -129,4 +131,5 @@ console.log('  ├─ node.exe                  ← 老师免装 Node');
 console.log('  ├─ server/server.js          ← 后端单文件');
 console.log('  ├─ client/dist/              ← 前端静态资源');
 console.log('  ├─ data/                     ← 运行时写入 SQLite');
+console.log('  ├─ log/                      ← 操作日志（按天 JSONL，保留 30 天）');
 console.log('  └─ 启动辩论赛系统.bat        ← 双击启动');
