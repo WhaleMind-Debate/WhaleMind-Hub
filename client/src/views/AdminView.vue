@@ -10,6 +10,7 @@
  *   setStages 指令交给服务端校验并广播回来——服务端始终是唯一权威。
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { useRouter } from 'vue-router';
 import { Message } from '@arco-design/web-vue';
 import { TEMPLATES, type MatchConfig, type PublishedScores, type SavedTemplate, type Side, type StageConfig } from '@/types/debate';
 import { useDebateStore } from '@/stores/debateStore';
@@ -23,6 +24,7 @@ import StageEditorDrawer from '@/components/StageEditorDrawer.vue';
 import { draftFromStage, draftToInput, type StageDraft } from '@/stages/draft';
 
 const store = useDebateStore();
+const router = useRouter();
 const { connect, sendCommand, previewScores, onScoreProgress } = useSocket();
 const { tick, remainingOf } = useMasterClock();
 
@@ -317,6 +319,7 @@ function timerText(side: Side): string {
             <a-tag v-if="store.config">入场码：{{ store.config.entryCode }}</a-tag>
             <a-tag v-if="dirty" color="orange">赛制未保存</a-tag>
             <a-tag :color="clockStatus.color">{{ clockStatus.text }}</a-tag>
+            <a-button size="small" @click="router.push('/board')">比分后台</a-button>
           </a-space>
         </template>
       </a-page-header>
