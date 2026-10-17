@@ -76,18 +76,10 @@ const bat = `@echo off
 title 鲸思云辩 · 辩论赛全流程系统
 cd /d "%~dp0"
 
-rem 端口预检：7369 被占用则给出提示并退出（保留窗口）
-netstat -ano | findstr /r ":7369 .*LISTENING" >nul 2>&1
-if %errorlevel%==0 (
-  echo.
-  echo   [提示] 端口 7369 已被占用，无法启动。
-  echo   请先关闭占用该端口的程序，再重新双击本脚本。
-  echo.
-  pause
-  exit /b 1
-)
-
-rem 显式指定包内路径，避免相对 import.meta.url 的层级假设
+rem 显式指定包内路径，避免相对 import.meta.url 的层级假设。
+rem 端口占用交给 node 自己检测（EADDRINUSE 时打印提示并 pause），
+rem 不用 netstat/findstr 预检——findstr 对 ":数字" 模式的匹配在不同
+rem Windows/locale 下行为不一致，会误报“端口被占用”。
 set OPEN_BROWSER=1
 set PORT=7369
 set DB_PATH=%~dp0data\\debate.db
