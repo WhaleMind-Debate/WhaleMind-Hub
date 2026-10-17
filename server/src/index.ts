@@ -41,7 +41,8 @@ import { GameEngine } from './game/engine.js';
 import { CSV_BOM, toCsv } from './report/csv.js';
 import { createNtpSync } from './time/ntp.js';
 
-const PORT = Number(process.env.PORT ?? 3000);
+// 分发包默认用 7369（老师机上 3000 常被其他程序占用）；dev 可用 PORT 环境变量覆盖
+const PORT = Number(process.env.PORT ?? 7369);
 const HOST = process.env.HOST ?? '0.0.0.0';
 
 const app = express();
@@ -242,7 +243,7 @@ app.delete('/api/templates/:templateId', (req, res) => {
 // ==================== 生产态静态托管（单端口） ====================
 /**
  * 把 client/dist 交给本服务同源托管：老师/评委访问 :PORT 一个端口即可，
- * 不再需要 vite dev（:5173）与后端（:3000）两个进程。
+ * 不再需要 vite dev（:5173）与后端（:7369）两个进程。
  * 客户端 socket.io 与 fetch 本就是同源相对路径（io() 无 URL、fetch('/api/…')），
  * 生产产物零改动即可同源工作。
  * 路径定位用「env 优先 + 候选探测」，兼容源码运行（server/src）与打包产物（server/dist）两种布局。

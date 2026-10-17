@@ -1,5 +1,5 @@
 /**
- * 服务端 HTTP 接口封装（浏览器同源访问，开发期由 Vite 代理 /api → :3000）
+ * 服务端 HTTP 接口封装（浏览器同源访问，开发期由 Vite 代理 /api → :7369）
  *
  * 与 Socket 的分工：
  * - 实时比赛状态与控制指令走 Socket（debateStore / useSocket）；

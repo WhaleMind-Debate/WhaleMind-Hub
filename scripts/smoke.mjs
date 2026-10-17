@@ -5,7 +5,7 @@
  */
 import { io } from 'socket.io-client';
 
-const URL = 'http://localhost:3000';
+const URL = 'http://localhost:7369';
 const EVENTS = {
   MATCH_COMMAND: 'match:command',
   JUDGE_JOIN: 'judge:join',
@@ -198,7 +198,7 @@ check('大屏收到 published 总分与胜负', typeof s7.published?.aff?.weight
 check('scoreVisibility 同步为 published', s7.config.scoreVisibility === 'published');
 
 // 7. CSV 导出（走后端 HTTP 路由，与前端按钮同链路）
-const csvRes = await fetch(`http://localhost:3000/api/matches/${s7.config.matchId}/export.csv`);
+const csvRes = await fetch(`http://localhost:7369/api/matches/${s7.config.matchId}/export.csv`);
 const csvBuf = new Uint8Array(await csvRes.arrayBuffer());
 // 注意：Response.text() 会按规范剥掉 BOM，BOM 必须验原始字节
 const hasBom = csvBuf[0] === 0xef && csvBuf[1] === 0xbb && csvBuf[2] === 0xbf;

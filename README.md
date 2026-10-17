@@ -18,7 +18,7 @@
 2. 双击 `启动辩论赛系统.bat`
 3. 浏览器会自动打开主席控制台；窗口里也会显示大屏/评委端地址
 
-评委手机连同一 WiFi 访问 `http://<主席机IP>:3000/judge`（入场码显示在控制台右上角）。
+评委手机连同一 WiFi 访问 `http://<主席机IP>:7369/judge`（入场码显示在控制台右上角）。
 
 打包者本机一键产出分发包：`pnpm release`（= build client + server + 打包 node.exe/静态资源/启动脚本 → `dist-release/` 与 `dist-release.zip`）。数据写在包内 `data/`，随包带走；端口被占用会友好提示。
 
@@ -29,7 +29,7 @@
 
 ```bash
 pnpm install             # 安装依赖
-pnpm dev                 # 并行启动 server (:3000) + client (:5173)
+pnpm dev                 # 并行启动 server (:7369) + client (:5173)
 pnpm test                # 服务端状态机 vitest 用例
 node scripts/smoke.mjs   # 三端联动冒烟（需先启动 server）
 ```

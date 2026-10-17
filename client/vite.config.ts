@@ -15,12 +15,12 @@ export default defineConfig({
     proxy: {
       // 开发期把 Socket.io 代理到后端，客户端可同源连接
       '/socket.io': {
-        target: 'http://localhost:3000',
+        target: 'http://localhost:7369',
         ws: true,
       },
       // 赛后查询 / 赛制模板 CRUD 等 HTTP 接口同样代理，避免浏览器直连跨域
       '/api': {
-        target: 'http://localhost:3000',
+        target: 'http://localhost:7369',
         changeOrigin: true,
       },
     },
