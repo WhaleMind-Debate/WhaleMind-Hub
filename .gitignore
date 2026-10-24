@@ -30,3 +30,6 @@ WhaleMind-Hub/
 
 # 合并计划书（内部工作文档，不入库）
 RUN.md
+
+# Python 参赛版本（独立开发，暂不入库）
+WM-Hub-Py/
